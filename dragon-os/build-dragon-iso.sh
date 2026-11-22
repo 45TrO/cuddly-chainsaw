@@ -11,7 +11,7 @@ PROFILE_DIR="/tmp/dragon-profile"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Instalando archiso..."
-sudo pacman -S --needed --noconfirm archiso
+sudo pacman -S --needed --noconfirm archiso ffmpeg
 
 echo "==> Preparando perfil base releng do Arch Linux..."
 sudo rm -rf "$PROFILE_DIR" "$WORK_DIR"
@@ -49,7 +49,19 @@ python-pymupdf
 ttf-jetbrains-mono-nerd
 noto-fonts-cjk
 ollama
+cliphist
+hyprlock
+hyprpaper
+inotify-tools
+nwg-dock-hyprland
+fastfetch
+mpv
 EOF
+
+# Assets da abertura gerados uma vez (papel de parede e clarão final; o Plymouth não roda na ISO live)
+ASSETS_TMP="$(mktemp -d)"
+trap 'rm -rf "$ASSETS_TMP"' EXIT
+"$REPO_DIR/boot/make-boot-assets.sh" "$REPO_DIR/assets/boot-intro.mp4" "$ASSETS_TMP"
 
 # 2. Injeta os arquivos do Dragon OS na ISO.
 #    O usuário live do releng é o root (home /root, populado por airootfs/root),
@@ -58,13 +70,18 @@ inject_home() {
     local dest="$1"
     mkdir -p "$dest/.config/dragon-breath" "$dest/.config/hypr" "$dest/dragon-os"
 
-    # Cópia do repositório sem a pasta de saída da ISO nem o .git
+    # Cópia do repositório sem a pasta de saída da ISO nem o .git (o instalador roda a partir dela)
     tar -C "$REPO_DIR" --exclude=./out-iso --exclude=./.git -cf - . | tar -C "$dest/dragon-os" -xf -
 
     [[ -d "$REPO_DIR/core" ]] && cp -r "$REPO_DIR/core/"* "$dest/.config/dragon-breath/"
+    cp "$REPO_DIR/VERSION" "$dest/.config/dragon-breath/VERSION"
+    mkdir -p "$dest/.config/dragon-breath/assets"
+    cp "$ASSETS_TMP/intro.mp4" "$ASSETS_TMP/wallpaper.png" "$dest/.config/dragon-breath/assets/"
     if [[ -d "$REPO_DIR/dotfiles" ]]; then
-        cp "$REPO_DIR/dotfiles/hyprland.conf" "$dest/.config/hypr/hyprland.conf"
-        cp -r "$REPO_DIR/dotfiles/waybar" "$REPO_DIR/dotfiles/ghostty" "$REPO_DIR/dotfiles/dunst" "$dest/.config/"
+        cp "$REPO_DIR/dotfiles/hyprland.conf" "$REPO_DIR/dotfiles/hyprlock.conf" \
+           "$REPO_DIR/dotfiles/hyprpaper.conf" "$dest/.config/hypr/"
+        cp -r "$REPO_DIR/dotfiles/waybar" "$REPO_DIR/dotfiles/ghostty" "$REPO_DIR/dotfiles/dunst" \
+              "$REPO_DIR/dotfiles/fastfetch" "$REPO_DIR/dotfiles/nwg-dock-hyprland" "$dest/.config/"
         cp "$REPO_DIR/dotfiles/starship.toml" "$dest/.config/starship.toml"
     fi
 

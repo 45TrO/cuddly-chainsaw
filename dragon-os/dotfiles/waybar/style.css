@@ -79,6 +79,10 @@ window#waybar {
     margin: 4px 2px;
 }
 
+#custom-scales.offline, #custom-scales.off {
+    color: #E34234;
+}
+
 #custom-scales.indexing {
     color: #D4AF37;
     border: 1px solid #D4AF37;

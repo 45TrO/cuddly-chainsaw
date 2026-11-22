@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 🐉 DRAGON OS (龙) - MASTER INSTALLER & BOOTSTRAP (Camada D)
+# 🐉 DRAGON OS (龙) v1.5 - MASTER INSTALLER & BOOTSTRAP (Camada D)
 # Transforma Arch Linux / CachyOS no Dragon OS Completo
 # ============================================================================
 
@@ -18,6 +18,7 @@ DRAGON_DIR="$HOME/.config/dragon-breath"
 SCALES_DIR="$HOME/.local/share/dragon-scales"
 WHISPER_DIR="$HOME/.local/share/dragon-whisper"
 BACKUP_DIR="$HOME/.config/dragon-backup-$(date +%Y%m%d_%H%M%S)"
+DRAGON_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo 1.5)"
 
 if [[ $EUID -eq 0 ]]; then
     echo -e "${CINNABAR}Não execute como root: os arquivos vão para o \$HOME do usuário. Rode como usuário comum (sudo é chamado quando preciso).${RESET}"
@@ -33,7 +34,7 @@ cat << "EOF"
 /____/_/  \_,_/\_, /\___/_//_/    \____/____/  
               /___/       [ 龙 - Ink & Jade Edition ]
 EOF
-echo -e "${RESET}"
+echo -e "                                        v${DRAGON_VERSION}${RESET}"
 
 # ----------------------------------------------------------------------------
 # ETAPA 1: Detecção de Hardware e Classificação de Tier
@@ -119,6 +120,8 @@ sudo pacman -Syu --needed --noconfirm \
     wl-clipboard wtype grim slurp tesseract tesseract-data-por tesseract-data-eng \
     pipewire pipewire-pulse libnotify xdg-utils pciutils \
     eza bat ripgrep fd zoxide bottom \
+    cliphist hyprlock hyprpaper inotify-tools nwg-dock-hyprland fastfetch \
+    ffmpeg mpv plymouth greetd \
     ttf-jetbrains-mono-nerd noto-fonts-cjk \
     "$OLLAMA_PKG" "${EXTRA_PKGS[@]}"
 
@@ -159,8 +162,18 @@ EOF
 # Copia scripts do diretório core/ se existirem no repositório
 if [[ -d "$REPO_DIR/core" ]]; then
     cp -r "$REPO_DIR/core/"* "$DRAGON_DIR/"
-    chmod +x "$DRAGON_DIR/"*.py "$DRAGON_DIR/"*.sh 2>/dev/null || true
+    cp "$REPO_DIR/VERSION" "$DRAGON_DIR/VERSION" 2>/dev/null || true
+    chmod +x "$DRAGON_DIR/dragonctl" "$DRAGON_DIR/"*.py "$DRAGON_DIR/"*.sh 2>/dev/null || true
 fi
+
+# v1.5: breath.py, dragon_eye.py, scales_search.py e scales_indexer.py viraram o 'dragonctl'
+for obsolete in breath.py dragon_eye.py scales_search.py scales_indexer.py; do
+    rm -f "$DRAGON_DIR/$obsolete"
+done
+
+# dragonctl no PATH do usuário
+mkdir -p "$HOME/.local/bin"
+ln -sf "$DRAGON_DIR/dragonctl" "$HOME/.local/bin/dragonctl"
 
 # Função de backup e link/cópia de dotfiles
 deploy_config() {
@@ -178,10 +191,19 @@ deploy_config() {
 
 if [[ -d "$REPO_DIR/dotfiles" ]]; then
     deploy_config "$REPO_DIR/dotfiles/hyprland.conf" "$HOME/.config/hypr/hyprland.conf"
+    deploy_config "$REPO_DIR/dotfiles/hyprlock.conf" "$HOME/.config/hypr/hyprlock.conf"
+    deploy_config "$REPO_DIR/dotfiles/hyprpaper.conf" "$HOME/.config/hypr/hyprpaper.conf"
+    deploy_config "$REPO_DIR/dotfiles/fastfetch" "$HOME/.config/fastfetch"
+    deploy_config "$REPO_DIR/dotfiles/nwg-dock-hyprland" "$HOME/.config/nwg-dock-hyprland"
     deploy_config "$REPO_DIR/dotfiles/waybar" "$HOME/.config/waybar"
     deploy_config "$REPO_DIR/dotfiles/ghostty/config" "$HOME/.config/ghostty/config"
     deploy_config "$REPO_DIR/dotfiles/dunst/dunstrc" "$HOME/.config/dunst/dunstrc"
     deploy_config "$REPO_DIR/dotfiles/starship.toml" "$HOME/.config/starship.toml"
+fi
+
+# Assets da abertura (quadros do Plymouth, clarão final e papel de parede)
+if [[ -f "$REPO_DIR/assets/boot-intro.mp4" ]]; then
+    "$REPO_DIR/boot/make-boot-assets.sh" "$REPO_DIR/assets/boot-intro.mp4" "$DRAGON_DIR/assets"
 fi
 
 # Configura Zsh + Starship + Dragon Shell
@@ -202,70 +224,22 @@ fi
 # ----------------------------------------------------------------------------
 # ETAPA 5: Criação e Ativação dos Serviços Systemd (User & System)
 # ----------------------------------------------------------------------------
-echo -e "\n${GOLD}==> [5/7] Configurando Daemons (Ollama, dragond, Scales e Whisper)...${RESET}"
+echo -e "\n${GOLD}==> [5/7] Configurando Daemons (Ollama, dragond e Whisper)...${RESET}"
 
 sudo systemctl enable --now ollama.service
 mkdir -p "$HOME/.config/systemd/user"
 
-# 1. dragond.service
-cat << 'EOF' > "$HOME/.config/systemd/user/dragond.service"
-[Unit]
-Description=Dragon OS Core Daemon (Hardware Tier & VRAM Manager)
-After=default.target
+# v1.5: o timer de 15 min deu lugar à indexação sob demanda via inotify
+systemctl --user disable --now dragon-scales.timer 2>/dev/null || true
+for old_unit in dragon-scales.timer dragon-scales.service; do
+    rm -f "$HOME/.config/systemd/user/$old_unit"
+done
 
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 %h/.config/dragon-breath/dragond.py
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-EOF
-
-# 2. dragon-scales.service & timer
-cat << 'EOF' > "$HOME/.config/systemd/user/dragon-scales.service"
-[Unit]
-Description=Dragon OS Scales - Indexador Vetorial Local (RAG)
-
-[Service]
-Type=oneshot
-Nice=19
-IOSchedulingClass=idle
-ExecStart=/usr/bin/python3 %h/.config/dragon-breath/scales_indexer.py
-EOF
-
-cat << 'EOF' > "$HOME/.config/systemd/user/dragon-scales.timer"
-[Unit]
-Description=Executa o indexador Dragon Scales a cada 15 minutos
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=15min
-
-[Install]
-WantedBy=timers.target
-EOF
-
-# 3. dragon-whisper.service
-cat << 'EOF' > "$HOME/.config/systemd/user/dragon-whisper.service"
-[Unit]
-Description=Dragon OS Whispering Wind - Servidor Local whisper.cpp
-After=default.target
-
-[Service]
-Type=simple
-WorkingDirectory=%h/.local/share/dragon-whisper
-ExecStart=%h/.local/share/dragon-whisper/build/bin/whisper-server -m models/active-model.bin -l pt -t 4 --host 127.0.0.1 --port 8178
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-EOF
+# Unidades versionadas no repositório (systemd/): fonte única, sem cópias embutidas aqui
+cp "$REPO_DIR/systemd/"*.service "$HOME/.config/systemd/user/"
 
 systemctl --user daemon-reload
 systemctl --user enable --now dragond.service
-systemctl --user enable --now dragon-scales.timer
 systemctl --user enable --now dragon-whisper.service
 
 # ----------------------------------------------------------------------------
@@ -283,15 +257,22 @@ ollama pull nomic-embed-text
 ollama pull "$DRAGON_MODEL"
 ollama pull "$VISION_MODEL"
 
+# O monitor de arquivos sobe depois do modelo de embeddings: a primeira sincronização
+# indexa o que já existe em ~/Documentos e ~/Projetos (prioridade mínima de CPU/disco)
+systemctl --user enable --now dragon-scales-watch.service
+
 # ----------------------------------------------------------------------------
-# ETAPA 7: Indexação Inicial e Conclusão
+# ETAPA 7: Abertura de Boot (Plymouth + login automático selado pelo hyprlock)
 # ----------------------------------------------------------------------------
-echo -e "\n${GOLD}==> [7/7] Disparando indexação inicial do Dragon Scales em segundo plano...${RESET}"
-# --no-block: o serviço é oneshot e, sem isso, o instalador esperaria a indexação terminar
-systemctl --user start --no-block dragon-scales.service || true
+echo -e "\n${GOLD}==> [7/7] Forjando a abertura de boot (Plymouth Ink & Jade)...${RESET}"
+if [[ "${DRAGON_BOOT_SPLASH:-1}" == 1 && -d "$DRAGON_DIR/assets/plymouth" ]]; then
+    sudo DRAGON_AUTOLOGIN="${DRAGON_AUTOLOGIN:-1}" "$REPO_DIR/boot/install-boot-splash.sh" "$DRAGON_DIR/assets" "$USER"
+else
+    echo "    Abertura pulada (DRAGON_BOOT_SPLASH=0 ou assets ausentes)."
+fi
 
 echo -e "\n${JADE}${BOLD}============================================================================${RESET}"
-echo -e "${JADE}${BOLD}🐉 DRAGON OS (${DRAGON_TIER} Edition) INSTALADO COM SUCESSO!${RESET}"
+echo -e "${JADE}${BOLD}🐉 DRAGON OS v${DRAGON_VERSION} (${DRAGON_TIER} Edition) INSTALADO COM SUCESSO!${RESET}"
 echo -e "${JADE}${BOLD}============================================================================${RESET}"
 echo -e "  • ${GOLD}Super + Space${RESET}         : Launcher de Aplicativos (Rofi Ink & Jade)"
 echo -e "  • ${GOLD}Super + Shift + Space${RESET} : Dragon Breath (IA Global, '@' clipboard, '#' RAG Scales)"
@@ -299,4 +280,9 @@ echo -e "  • ${GOLD}Super + V${RESET}             : Whispering Wind (Ditado po
 echo -e "  • ${GOLD}Super + Shift + S${RESET}     : Dragon Eye (OCR e Visão Computacional na tela)"
 echo -e "  • ${GOLD}Ctrl + G (no Zsh)${RESET}     : Traduz linguagem natural em comando Linux"
 echo -e "  • ${GOLD}wtf (no Zsh)${RESET}          : Explica e corrige o último erro do terminal"
+echo -e "  • ${GOLD}gcai (no Zsh)${RESET}         : Mensagem de commit (Conventional Commits) a partir do diff"
+echo -e "  • ${GOLD}Super + C${RESET}             : Dragon Hoard (histórico do clipboard + IA)"
+echo -e "  • ${GOLD}Super + Z${RESET}             : Modo Santuário (foco profundo)"
+echo -e "  • ${GOLD}Super + Esc${RESET}           : Selo de Jade (bloqueio de tela)"
+echo -e "\nReinicie para ver a abertura de boot."
 echo -e "\nBackup das suas configurações anteriores salvo em: ${BACKUP_DIR}"

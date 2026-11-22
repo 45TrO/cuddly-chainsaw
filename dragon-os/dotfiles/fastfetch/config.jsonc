@@ -1,0 +1,30 @@
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "type": "file",
+        "source": "~/.config/fastfetch/dragon.txt",
+        "color": { "1": "38;2;0;168;107", "2": "38;2;212;175;55" },
+        "padding": { "right": 3 }
+    },
+    "display": {
+        "separator": "  ",
+        "color": { "keys": "38;2;0;168;107", "title": "38;2;212;175;55" }
+    },
+    "modules": [
+        "title",
+        "separator",
+        { "type": "command", "key": "Sistema", "text": "echo \"Dragon OS $(cat ~/.config/dragon-breath/VERSION 2>/dev/null || echo 1.5) · Ink & Jade\"" },
+        { "type": "command", "key": "Tier", "text": "jq -r '.icon + \" \" + .tier' /tmp/dragon_state.json 2>/dev/null || echo 'dragond parado'" },
+        { "type": "kernel", "key": "Kernel" },
+        { "type": "uptime", "key": "Uptime" },
+        { "type": "packages", "key": "Pacotes" },
+        { "type": "shell", "key": "Shell" },
+        { "type": "wm", "key": "Compositor" },
+        { "type": "terminal", "key": "Terminal" },
+        { "type": "cpu", "key": "CPU" },
+        { "type": "gpu", "key": "GPU" },
+        { "type": "memory", "key": "Memória" },
+        "break",
+        "colors"
+    ]
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Dragon OS Scales - Indexação sob demanda via inotify (RAG)
+After=default.target
+
+[Service]
+Type=simple
+# Só indexa o arquivo que acabou de ser salvo; prioridade mínima de CPU e disco
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 %h/.config/dragon-breath/dragonctl watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
