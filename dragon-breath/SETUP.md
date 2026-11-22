@@ -57,3 +57,13 @@ cp starship.toml ~/.config/starship.toml
 # no ~/.zshrc, DEPOIS do source do dragon-shell.zsh:
 eval "$(starship init zsh)"
 ```
+
+## Dragon Eye (龙眼) - OCR + visão local
+
+```bash
+sudo pacman -S grim slurp tesseract tesseract-data-por tesseract-data-eng wl-clipboard
+ollama pull moondream   # Tier Wyrm
+ollama pull llava       # Tiers Drake / Imperial Dragon
+chmod +x ~/.config/dragon-breath/dragon_eye.py
+```
+Atalho: `Super + Shift + S` (já em `hypr/hyprland.conf`).
