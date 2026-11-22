@@ -112,9 +112,14 @@ def main():
         f"🔄 Nova pergunta"
     ]
 
+    if sources:
+        actions.insert(0, f"📂 Abrir fonte principal: {sources[0]['file']}")
+
     choice = rofi_prompt("🐉 Ação", answer, actions)
 
-    if choice.startswith("📋"):
+    if choice.startswith("📂"):
+        subprocess.Popen(["xdg-open", sources[0]["path"]])
+    elif choice.startswith("📋"):
         subprocess.run(["wl-copy"], input=answer, text=True)
     elif choice.startswith("⚡"):
         subprocess.run(["wl-copy"], input=first_line, text=True)
