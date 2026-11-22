@@ -48,3 +48,12 @@ chmod +x ~/.config/dragon-breath/dragond.py
 echo 'source ~/.config/dragon-breath/dragon-shell.zsh' >> ~/.zshrc
 # ferramentas: sudo pacman -S eza bat ripgrep fd bottom zoxide jq
 ```
+
+## Starship
+
+```bash
+sudo pacman -S starship
+cp starship.toml ~/.config/starship.toml
+# no ~/.zshrc, DEPOIS do source do dragon-shell.zsh:
+eval "$(starship init zsh)"
+```

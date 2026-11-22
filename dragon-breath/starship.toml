@@ -1,0 +1,43 @@
+format = """
+[╭─](fg:#00A86B)\
+$custom\
+$directory\
+$git_branch\
+$git_status\
+$cmd_duration\
+$line_break\
+[╰─](fg:#00A86B)$character"""
+
+palette = "ink_and_jade"
+
+[palettes.ink_and_jade]
+jade = "#00A86B"
+gold = "#D4AF37"
+cinnabar = "#E34234"
+ink = "#0D0F12"
+mist = "#7A8490"
+
+[character]
+success_symbol = "[龙 ❯](bold jade)"
+error_symbol = "[龙 ❯](bold cinnabar)"
+
+[directory]
+style = "bold gold"
+truncation_length = 3
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = "🌱 "
+style = "bold jade"
+
+[git_status]
+style = "cinnabar"
+
+[cmd_duration]
+min_time = 1_500
+format = " [⏱ $duration](mist)"
+
+[custom.dragon_tier]
+command = "jq -r '.icon + \" \" + .tier' /tmp/dragon_state.json 2>/dev/null || echo '🐉 Lóng'"
+when = "true"
+format = "[($output) ](bold jade)"
