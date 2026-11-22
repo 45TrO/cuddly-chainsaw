@@ -1,0 +1,71 @@
+* {
+    bg-ink:       #0D0F12E6;
+    bg-card:      #161A20FF;
+    jade:         #00A86BFF;
+    gold:         #D4AF37FF;
+    text-light:   #E5E9F0FF;
+    text-dim:     #7A8490FF;
+
+    background-color: transparent;
+    text-color:       @text-light;
+    font:             "JetBrainsMono Nerd Font 11";
+}
+
+window {
+    width:            680px;
+    background-color: @bg-ink;
+    border:           2px;
+    border-color:     @jade;
+    border-radius:    10px;
+    padding:          16px;
+}
+
+inputbar {
+    children:         [ prompt, entry ];
+    background-color: @bg-card;
+    border-radius:    6px;
+    padding:          10px 14px;
+    margin:           0px 0px 12px 0px;
+}
+
+prompt {
+    text-color:       @gold;
+    font:             "JetBrainsMono Nerd Font Bold 11";
+    margin:           0px 10px 0px 0px;
+}
+
+entry {
+    placeholder:       "Invoque o Sopro do Dragão...";
+    placeholder-color: @text-dim;
+}
+
+message {
+    background-color: @bg-card;
+    border:           1px solid;
+    border-color:     @gold;
+    border-radius:    6px;
+    padding:          12px;
+    margin:           0px 0px 12px 0px;
+}
+
+textbox {
+    text-color:       @text-light;
+}
+
+listview {
+    lines:            4;
+    columns:          1;
+    fixed-height:     false;
+    spacing:          6px;
+}
+
+element {
+    padding:          8px 12px;
+    border-radius:    6px;
+}
+
+element selected.normal {
+    background-color: @jade;
+    text-color:       #0D0F12FF;
+    font:             "JetBrainsMono Nerd Font Bold 11";
+}
