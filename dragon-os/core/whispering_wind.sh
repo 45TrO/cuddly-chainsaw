@@ -5,7 +5,7 @@ PID_FILE="/tmp/whispering_wind.pid"
 AUDIO_FILE="/tmp/whispering_wind.wav"
 SERVER_URL="http://127.0.0.1:8178/inference"
 CLI_BIN="$HOME/.local/share/dragon-whisper/build/bin/whisper-cli"
-MODEL_PATH="$HOME/.local/share/dragon-whisper/models/ggml-small-q5_1.bin"
+MODEL_PATH="$HOME/.local/share/dragon-whisper/models/active-model.bin"
 
 # Se já estiver gravando, para a gravação e transcreve
 if [ -f "$PID_FILE" ]; then

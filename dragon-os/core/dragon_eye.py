@@ -22,10 +22,7 @@ def get_vision_model():
         return os.environ["DRAGON_VISION_MODEL"]
     try:
         with open(STATE_FILE) as f:
-            tier = json.load(f).get("tier", "Wyrm")
-        if tier == "Wyrm":
-            return "moondream"
-        return "llava" # Ou minicpm-v / llama3.2-vision
+            return json.load(f).get("vision_model", "moondream")
     except Exception:
         return "moondream"
 

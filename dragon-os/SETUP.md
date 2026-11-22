@@ -32,7 +32,7 @@ cmake --build build -j$(nproc) --config Release
 sh ./models/download-ggml-model.sh small-q5_1
 
 # Serviço
-cp ~/<repo>/dragon-breath/systemd/dragon-whisper.service ~/.config/systemd/user/
+cp systemd/dragon-whisper.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dragon-whisper.service
 ```

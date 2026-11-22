@@ -6,7 +6,7 @@ After=default.target
 Type=simple
 WorkingDirectory=%h/.local/share/dragon-whisper
 ExecStart=%h/.local/share/dragon-whisper/build/bin/whisper-server \
-    -m models/ggml-small-q5_1.bin \
+    -m models/active-model.bin \
     -l pt \
     -t 4 \
     --host 127.0.0.1 \

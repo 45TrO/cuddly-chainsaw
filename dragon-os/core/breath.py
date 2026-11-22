@@ -8,7 +8,18 @@ import os
 from scales_search import search_scales
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL = os.environ.get("DRAGON_MODEL", "qwen2.5-coder:3b")
+STATE_FILE = "/tmp/dragon_state.json"
+
+def get_model():
+    """DRAGON_MODEL do ambiente; senão o modelo do Tier definido pelo dragond."""
+    if os.environ.get("DRAGON_MODEL"):
+        return os.environ["DRAGON_MODEL"]
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)["default_model"]
+    except Exception:
+        return "qwen2.5-coder:3b"
+
 ROFI_THEME = os.path.expanduser("~/.config/dragon-breath/config.rasi")
 
 SYSTEM_PROMPT = (
@@ -42,7 +53,7 @@ def query_ollama(user_query, include_clip=False):
             full_prompt = f"Contexto da área de transferência:\n{clip}\n\nPergunta: {user_query}"
 
     payload = {
-        "model": MODEL,
+        "model": get_model(),
         "prompt": full_prompt,
         "system": SYSTEM_PROMPT,
         "stream": False,

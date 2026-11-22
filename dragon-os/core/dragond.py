@@ -59,6 +59,7 @@ def detect_tier(vram_total, gpu_type):
             "tier": "Wyrm",
             "icon": "🐍",
             "model": "qwen2.5-coder:1.5b",
+            "vision_model": "moondream",
             "vram_limit_pct": 85
         }
     elif vram_total < 14000:
@@ -66,6 +67,7 @@ def detect_tier(vram_total, gpu_type):
             "tier": "Drake",
             "icon": "🦎",
             "model": "qwen2.5-coder:7b",
+            "vision_model": "moondream",
             "vram_limit_pct": 88
         }
     else:
@@ -73,6 +75,7 @@ def detect_tier(vram_total, gpu_type):
             "tier": "Imperial Dragon",
             "icon": "🐉",
             "model": "qwen2.5-coder:14b",
+            "vision_model": "llava",
             "vram_limit_pct": 90
         }
 
@@ -122,12 +125,14 @@ def write_env_and_state(profile, vram_total, vram_used, gpu_type, loaded_models)
     with open(ENV_FILE, "w") as f:
         f.write(f'export DRAGON_TIER="{profile["tier"]}"\n')
         f.write(f'export DRAGON_MODEL="{profile["model"]}"\n')
+        f.write(f'export DRAGON_VISION_MODEL="{profile["vision_model"]}"\n')
 
     state = {
         "tier": profile["tier"],
         "icon": profile["icon"],
         "gpu_type": gpu_type,
         "default_model": profile["model"],
+        "vision_model": profile["vision_model"],
         "vram_total_mb": vram_total,
         "vram_used_mb": vram_used,
         "vram_pct": round((vram_used / max(vram_total, 1)) * 100, 1),
