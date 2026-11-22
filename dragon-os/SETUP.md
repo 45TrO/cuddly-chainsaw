@@ -46,16 +46,24 @@ dragon-os/
 ## dragonctl
 
 ```bash
+dragonctl status                 # painel de telemetria (alias: dstat)
+dragonctl status --waybar        # JSON do módulo custom/dragond da Waybar
+dragonctl evict [-q]             # libera a VRAM (Super+Shift+Backspace, alias: devict)
+dragonctl model                  # lista modelos; 'dragonctl model qwen2.5-coder:7b -w' troca e pré-aquece
+dragonctl model --reset          # volta ao modelo do Tier
+dragonctl scales search "jwt"    # busca semântica (alias: dsearch)
+dragonctl scales reindex         # varredura completa manual
+dragonctl sanctuary              # Modo Santuário (Super+Z)
 dragonctl breath                 # Launcher IA (Super+Shift+Space)
 dragonctl eye                    # OCR / visão local (Super+Shift+S)
 dragonctl gen -m shell -1 "listar portas abertas"
 git diff --staged | dragonctl gen -m commit -1
 dragonctl ask "diferença entre fd e find"
-dragonctl search "configuração do waybar"
-dragonctl index --all            # varredura completa manual
-dragonctl evict                  # libera a VRAM (Super+Shift+Backspace)
-dragonctl status
+dragonctl index ~/Projetos/app   # indexa arquivos/pastas específicos
 ```
+
+A troca de modelo fica em `~/.config/dragon-breath/model.override`; o `dragond` respeita esse
+arquivo em vez de reescrever o modelo do Tier a cada 5 s.
 
 Prompts de sistema (`breath`, `shell`, `wtf`, `commit`, `hoard`) podem ser sobrescritos, e novos modos
 criados, em `~/.config/dragon-breath/prompts.json`:

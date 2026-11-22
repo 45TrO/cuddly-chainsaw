@@ -13,6 +13,7 @@ import urllib.request
 OLLAMA_BASE = "http://127.0.0.1:11434"
 STATE_FILE = "/tmp/dragon_state.json"
 ENV_FILE = os.path.expanduser("~/.config/dragon-breath/dragon_env.sh")
+MODEL_OVERRIDE = os.path.expanduser("~/.config/dragon-breath/model.override")
 
 # Processos pesados que exigem liberação imediata da VRAM (Jogos/Render/Compilação)
 HEAVY_PROCESSES = {"steam", "gamescope", "wine64-preloader", "blender", "obs", "kdenlive"}
@@ -120,18 +121,28 @@ def has_heavy_process():
     except Exception:
         return None
 
+def read_model_override():
+    """Modelo escolhido com 'dragonctl model' (tem prioridade sobre o modelo do Tier)."""
+    try:
+        with open(MODEL_OVERRIDE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
 def write_env_and_state(profile, vram_total, vram_used, gpu_type, loaded_models):
+    model = read_model_override() or profile["model"]
     os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
     with open(ENV_FILE, "w") as f:
         f.write(f'export DRAGON_TIER="{profile["tier"]}"\n')
-        f.write(f'export DRAGON_MODEL="{profile["model"]}"\n')
+        f.write(f'export DRAGON_MODEL="{model}"\n')
         f.write(f'export DRAGON_VISION_MODEL="{profile["vision_model"]}"\n')
 
     state = {
         "tier": profile["tier"],
         "icon": profile["icon"],
         "gpu_type": gpu_type,
-        "default_model": profile["model"],
+        "default_model": model,
+        "tier_model": profile["model"],
         "vision_model": profile["vision_model"],
         "vram_total_mb": vram_total,
         "vram_used_mb": vram_used,

@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-dragonctl (龙控) - CLI unificada de IA do Dragon OS v1.5
+dragonctl (龙控) - Orquestrador Unificado do Dragon OS v1.5
 
-Substitui breath.py, dragon_eye.py, scales_search.py e scales_indexer.py.
+Substitui breath.py, dragon_eye.py, scales_search.py e scales_indexer.py, e
+gerencia VRAM, modelos Ollama, busca vetorial (Scales), telemetria e Santuário.
 Todos os subcomandos compartilham um único cliente Ollama, que mantém a
 conexão HTTP aberta (keep-alive) durante toda a execução do comando.
 
-  dragonctl breath                 Launcher IA no Rofi ('@' clipboard, '#' Scales)
-  dragonctl eye                    Dragon Eye: captura de tela + OCR / visão local
-  dragonctl gen [-m MODO] TEXTO    Geração direta (usada pelo Zsh e pelo Hoard)
-  dragonctl ask TEXTO              Pergunta com streaming no terminal
-  dragonctl search CONSULTA        Busca semântica no índice Scales
-  dragonctl index [--all | ARQ…]   Indexa arquivos específicos ou varre tudo
-  dragonctl watch                  Indexação contínua via inotify (serviço)
-  dragonctl evict                  Descarrega todos os modelos da VRAM
-  dragonctl warmup                 Pré-carrega o modelo do Tier na memória
-  dragonctl status                 Mostra Tier, modelos carregados e o índice
+  dragonctl status [--waybar]            Painel de telemetria (ou JSON para a Waybar)
+  dragonctl evict [-q]                   Descarrega todos os modelos da VRAM
+  dragonctl model [NOME] [-w] [--reset]  Lista ou troca o modelo global
+  dragonctl scales search|reindex        Busca semântica / reindexação do Scales
+  dragonctl sanctuary                    Alterna o Modo Santuário
+  dragonctl breath                       Launcher IA no Rofi ('@' clipboard, '#' Scales)
+  dragonctl eye                          Dragon Eye: captura de tela + OCR / visão local
+  dragonctl gen [-m MODO] TEXTO          Geração direta (usada pelo Zsh e pelo Hoard)
+  dragonctl ask TEXTO                    Pergunta com streaming no terminal
+  dragonctl index [--all | ARQ…]         Indexa arquivos específicos ou varre tudo
+  dragonctl watch                        Indexação contínua via inotify (serviço)
+  dragonctl warmup                       Pré-carrega o modelo padrão na memória
 """
 import argparse
 import base64
@@ -31,6 +34,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 VERSION = "1.5"
 
@@ -51,6 +56,20 @@ INDEX_EXTS = CODE_EXTS | {".pdf"}
 IGNORE_DIRS = {".git", "node_modules", "target", "__pycache__", ".venv", "build"}
 DEBOUNCE_S = 2.0   # editores gravam o arquivo várias vezes seguidas
 RETRY_S = 30.0     # nova tentativa quando o Ollama está fora do ar
+SCORE_THRESHOLD = 0.32  # similaridade mínima de um trecho do Scales
+
+WHISPER_URL = "http://127.0.0.1:8178"
+SANCTUARY_LOCK = "/tmp/dragon_sanctuary.lock"
+# Modelo escolhido com 'dragonctl model'; o dragond o respeita no lugar do modelo do Tier
+MODEL_OVERRIDE = os.path.join(CONF_DIR, "model.override")
+
+# Paleta ANSI Ink & Jade
+JADE = "\033[38;2;0;168;107m"
+GOLD = "\033[38;2;212;175;55m"
+CINNABAR = "\033[38;2;227;66;52m"
+MIST = "\033[38;2;122;132;144m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
 
 DEFAULT_PROMPTS = {
     "breath": (
@@ -105,9 +124,21 @@ def _read_env_file():
     return values
 
 
+def read_model_override():
+    try:
+        with open(MODEL_OVERRIDE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def default_model():
-    """Ambiente -> estado do dragond -> dragon_env.sh -> modelo mínimo."""
-    return (os.environ.get("DRAGON_MODEL")
+    """'dragonctl model' -> ambiente -> estado do dragond -> dragon_env.sh -> modelo mínimo.
+
+    A escolha manual vem antes do ambiente porque shells já abertos guardam o DRAGON_MODEL antigo.
+    """
+    return (read_model_override()
+            or os.environ.get("DRAGON_MODEL")
             or _read_state().get("default_model")
             or _read_env_file().get("DRAGON_MODEL")
             or "qwen2.5-coder:1.5b")
@@ -240,8 +271,17 @@ class Ollama:
         data = self.call("/api/embed", {"model": EMBED_MODEL, "input": texts, "keep_alive": keep_alive}, timeout)
         return data["embeddings"]
 
+    def running(self, timeout=3):
+        """Modelos na memória: [{'name', 'size_mb'}] (size_vram quando há GPU)."""
+        return [{"name": m["name"],
+                 "size_mb": round(m.get("size_vram") or m.get("size", 0)) // (1024 * 1024)}
+                for m in self.call("/api/ps", None, timeout).get("models", [])]
+
     def loaded_models(self):
-        return [m["name"] for m in self.call("/api/ps", None, 3).get("models", [])]
+        return [m["name"] for m in self.running()]
+
+    def installed_models(self):
+        return [m["name"] for m in self.call("/api/tags", None, 5).get("models", [])]
 
     def unload(self, model):
         self.call("/api/generate", {"model": model, "keep_alive": 0}, 15)
@@ -459,7 +499,7 @@ def scan(conn, ol, dirs, log=print):
     return done, failed, removed
 
 
-def scales_search(ol, query, top_k=4, threshold=0.35):
+def scales_search(ol, query, top_k=4, threshold=SCORE_THRESHOLD):
     if not os.path.exists(DB_PATH):
         return []
     import numpy as np
@@ -705,18 +745,44 @@ def cmd_eye(a):
 
 
 def cmd_search(a):
-    try:
-        results = scales_search(Ollama(), " ".join(a.query), top_k=a.top_k)
-    except (OllamaError, sqlite3.Error) as e:
-        print(str(e), file=sys.stderr)
+    query = " ".join(a.query).strip()
+    if not query:
+        print(f"{CINNABAR}Informe o termo de busca. Ex: dragonctl scales search 'autenticação jwt'{RESET}")
         return 1
+    if not os.path.exists(DB_PATH):
+        print(f"{CINNABAR}Banco Scales ainda não existe. Rode 'dragonctl scales reindex'.{RESET}")
+        return 1
+    try:
+        results = scales_search(Ollama(), query, top_k=a.top_k)
+    except (OllamaError, sqlite3.Error) as e:
+        print(f"{CINNABAR}Erro ao consultar o Scales: {e}{RESET}", file=sys.stderr)
+        return 1
+
     if a.json:
-        print(json.dumps(results, ensure_ascii=False, indent=2))
-    else:
         for r in results:
-            print(f"\033[38;2;212;175;55m[{r['score']:.2f}] {r['path']}\033[0m")
-            print(r["content"][:300].replace("\n", " ") + "\n")
+            r["score"] = round(r["score"], 3)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"\n{JADE}{BOLD}🐉 Resultados no Dragon Scales para:{RESET} '{GOLD}{query}{RESET}'\n")
+    if not results:
+        print(f"  {MIST}Nenhum trecho relevante encontrado (score >= {SCORE_THRESHOLD}).{RESET}\n")
+        return 0
+    for i, r in enumerate(results, 1):
+        snippet = r["content"].replace("\n", " ")[:180]
+        print(f"  {BOLD}{i}. [{JADE}{r['file']}{RESET}{BOLD}]{RESET} {GOLD}(Similaridade: {r['score']:.3f}){RESET}")
+        print(f"     {MIST}Caminho:{RESET} {r['path']}")
+        print(f"     \"{snippet}...\"\n")
     return 0
+
+
+def cmd_scales(a):
+    """'dragonctl scales search ...' / 'dragonctl scales reindex' (interface da 1.5)."""
+    if a.scales_action == "reindex":
+        print(f"{JADE}⚡ Iniciando indexação incremental do Dragon Scales...{RESET}")
+        a.all, a.paths = True, []
+        return cmd_index(a)
+    return cmd_search(a)
 
 
 def cmd_index(a):
@@ -852,17 +918,32 @@ def cmd_watch(a):
 def cmd_evict(a):
     ol = Ollama()
     try:
-        loaded = ol.loaded_models()
-        for model in loaded:
-            ol.unload(model)
+        running = ol.loaded_models()
     except OllamaError as e:
-        print(str(e), file=sys.stderr)
+        print(f"{CINNABAR}{e}{RESET}", file=sys.stderr)
         return 1
-    if loaded:
-        notify("🐉 dragond: VRAM Liberada",
-               f"Modelos descarregados ({', '.join(loaded)}) — Motivo: {a.reason}")
-    print(f"Descarregados: {', '.join(loaded) or 'nenhum'}")
-    return 0
+
+    if not running:
+        msg = "Nenhum modelo ocupando a VRAM no momento."
+        print(f"{MIST}🐉 {msg}{RESET}")
+        if not a.quiet:
+            notify("🐉 dragonctl", msg)
+        return 0
+
+    evicted = []
+    for name in running:
+        try:
+            ol.unload(name)
+            evicted.append(name)
+        except OllamaError as e:
+            print(f"{CINNABAR}Erro ao descarregar {name}: {e}{RESET}")
+
+    if evicted:
+        joined = ", ".join(evicted)
+        print(f"{JADE}🐉 VRAM liberada com sucesso! Descarregados: {GOLD}{joined}{RESET}")
+        if not a.quiet:
+            notify("🐉 VRAM Liberada", f"Modelos removidos da memória: {joined} — Motivo: {a.reason}")
+    return 0 if len(evicted) == len(running) else 1
 
 
 def cmd_warmup(a):
@@ -876,38 +957,177 @@ def cmd_warmup(a):
     return 0
 
 
-def cmd_status(a):
-    state = _read_state()
-    print(f"Dragon OS {VERSION}")
-    if state:
-        print(f"  Tier      : {state.get('icon', '')} {state.get('tier', '?')} ({state.get('gpu_type', '?')})")
-        print(f"  Memória   : {state.get('vram_used_mb', '?')}/{state.get('vram_total_mb', '?')} MB "
-              f"({state.get('vram_pct', '?')}%)")
-    else:
-        print("  dragond   : sem estado (serviço parado?)")
-    print(f"  Modelo    : {default_model()} | Visão: {vision_model()}")
+def load_state():
+    """Estado do dragond; sem ele, valores neutros (não finge um Tier que não foi detectado)."""
+    state = {
+        "tier": "dragond off", "icon": "🐉", "gpu_type": "?",
+        "vram_total_mb": 0, "vram_used_mb": 0, "vram_pct": 0.0, "loaded_models": [],
+    }
+    state.update(_read_state())
+    return state
+
+
+def check_service_online(url):
     try:
-        loaded = Ollama().loaded_models()
-        print(f"  Na VRAM   : {', '.join(loaded) or 'nenhum'}")
-    except OllamaError as e:
-        print(f"  Ollama    : {e}")
-    if os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH, timeout=5)
+        urllib.request.urlopen(url, timeout=0.8)
+        return True
+    except urllib.error.HTTPError:
+        return True  # Servidor respondeu (ex: 404 na raiz do whisper-server)
+    except Exception:
+        return False
+
+
+def get_scales_stats():
+    if not os.path.exists(DB_PATH):
+        return 0, 0
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=2)
         try:
             files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            print(f"  Scales    : {files} arquivo(s), {chunks} trecho(s)")
-        except sqlite3.Error as e:
-            print(f"  Scales    : {e}")
         finally:
             conn.close()
+        return files, chunks
+    except sqlite3.Error:
+        return 0, 0
+
+
+def cmd_status(a):
+    state = load_state()
+    model = default_model()
+    try:
+        running = Ollama().running(timeout=1.5)
+        ollama_ok = True
+    except OllamaError:
+        running, ollama_ok = [], False
+    names = [m["name"] for m in running]
+    files, chunks = get_scales_stats()
+    edition = f"{state['tier']} Edition" if _read_state() else "dragond parado"
+
+    if a.waybar:
+        if names:
+            text = f"{state['icon']} {names[0]} ({state['vram_pct']:.0f}%)"
+            cls = "active"
+            models_str = ", ".join(f"{m['name']} ({m['size_mb']} MB)" for m in running)
+        else:
+            text = f"{state['icon']} {state['tier']} · Idle ({state['vram_pct']:.0f}%)"
+            cls = "idle" if ollama_ok else "offline"
+            models_str = "Nenhum modelo na VRAM" if ollama_ok else "Ollama offline"
+        tooltip = (
+            f"🐉 Dragon OS v{VERSION} ({edition})\n"
+            f"──────────────────────────\n"
+            f"GPU/Mem : {state['gpu_type']} ({state['vram_used_mb']}/{state['vram_total_mb']} MB)\n"
+            f"Modelo  : {model}\n"
+            f"Ativos  : {models_str}\n"
+            f"Scales  : {files} arquivos ({chunks} vetores)\n"
+            f"──────────────────────────\n"
+            f"Clique Esquerdo: Dragon Breath\n"
+            f"Clique Direito : Liberar VRAM"
+        )
+        print(json.dumps({"text": text, "tooltip": tooltip, "class": cls}))
+        return 0
+
+    # Exibição rica no terminal
+    whisper_ok = check_service_online(WHISPER_URL)
+    sanctuary_on = os.path.exists(SANCTUARY_LOCK)
+    override = read_model_override()
+    scales = {}
+    try:
+        with open(SCALES_STATUS) as f:
+            scales = json.load(f)
+    except Exception:
+        pass
+
+    print(f"\n{JADE}{BOLD}╭─── 🐉 DRAGON OS v{VERSION} — PAINEL DE CONTROLE (龙控) ───╮{RESET}")
+    print(f"  {BOLD}Edição / Tier :{RESET} {state['icon']} {GOLD}{edition}{RESET} ({state['gpu_type']})")
+    print(f"  {BOLD}Memória VRAM  :{RESET} {state['vram_used_mb']} MB / {state['vram_total_mb']} MB ({GOLD}{state['vram_pct']}%{RESET})")
+    print(f"  {BOLD}Modelo Padrão :{RESET} {JADE}{model}{RESET}{' (manual)' if override else ''} | Visão: {JADE}{vision_model()}{RESET}")
+    print(f"  {BOLD}Modo Santuário:{RESET} {'🧘 Ativo (Foco)' if sanctuary_on else 'Desativado'}")
+    print(f"{MIST}  ─────────────────────────────────────────────────────{RESET}")
+    print(f"  {BOLD}Ollama Daemon :{RESET} {'🟢 Online' if ollama_ok else '🔴 Offline'}")
+    if running:
+        for m in running:
+            print(f"    └─ ⚡ {GOLD}{m['name']}{RESET} ({m['size_mb']} MB alocados)")
     else:
-        print("  Scales    : índice ainda não criado")
+        print(f"    └─ {MIST}Zero modelos carregados na VRAM (Idle){RESET}")
+    print(f"  {BOLD}Whisper Wind  :{RESET} {'🟢 Pronto (127.0.0.1:8178)' if whisper_ok else '🔴 Offline'}")
+    print(f"  {BOLD}Dragon Scales :{RESET} 📚 {files} arquivos indexados ({chunks} blocos vetoriais)"
+          f"{' · ' + scales.get('text', '') if scales else ' · monitor parado'}")
+    print(f"{JADE}{BOLD}╰─────────────────────────────────────────────────────╯{RESET}\n")
     return 0
 
 
+def _with_tag(name):
+    return name if ":" in name else f"{name}:latest"
+
+
+def cmd_model(a):
+    ol = Ollama()
+    try:
+        installed = ol.installed_models()
+    except OllamaError as e:
+        print(f"{CINNABAR}Erro ao consultar Ollama: {e}{RESET}")
+        return 1
+
+    current = default_model()
+    if a.reset:
+        try:
+            os.remove(MODEL_OVERRIDE)
+        except FileNotFoundError:
+            pass
+        tier_model = _read_state().get("tier_model") or _read_env_file().get("DRAGON_MODEL") or "?"
+        print(f"{JADE}✅ Escolha manual removida: o dragond volta a usar o modelo do Tier ({GOLD}{tier_model}{RESET}{JADE}).{RESET}")
+        return 0
+
+    if not a.name:
+        print(f"{JADE}{BOLD}🐉 Modelos Locais Disponíveis no Dragon OS:{RESET}")
+        for name in installed:
+            marker = f"{GOLD}★ [ATIVO]{RESET}" if _with_tag(name) == _with_tag(current) else ""
+            print(f"  • {name} {marker}")
+        print(f"\n{MIST}Use 'dragonctl model <nome>' para alternar o modelo global "
+              f"('dragonctl model --reset' volta ao modelo do Tier).{RESET}")
+        return 0
+
+    target = a.name
+    if _with_tag(target) not in {_with_tag(n) for n in installed}:
+        print(f"{GOLD}⚠️ Modelo '{target}' não encontrado localmente. Baixando via Ollama...{RESET}")
+        try:
+            pulled = subprocess.run(["ollama", "pull", target]).returncode == 0
+        except FileNotFoundError:
+            pulled = False
+        if not pulled:
+            print(f"{CINNABAR}Falha ao baixar '{target}'. Modelo global não alterado.{RESET}")
+            return 1
+
+    # O dragond reescreve dragon_env.sh e o estado a cada 5s: a escolha fica num arquivo
+    # próprio que ele respeita, em vez de ser sobrescrita pelo modelo do Tier.
+    os.makedirs(CONF_DIR, exist_ok=True)
+    with open(MODEL_OVERRIDE, "w") as f:
+        f.write(target + "\n")
+
+    if a.warmup:
+        print(f"{JADE}🔥 Pré-aquecendo {target} na VRAM...{RESET}")
+        try:
+            ol.call("/api/generate", {"model": target, "keep_alive": "30m"}, timeout=180)
+        except OllamaError as e:
+            print(f"{CINNABAR}Falha no pré-aquecimento: {e}{RESET}")
+
+    print(f"{JADE}✅ Modelo global alterado para: {GOLD}{BOLD}{target}{RESET}")
+    notify("🐉 Modelo Alterado", f"Novo cérebro ativo: {target}")
+    return 0
+
+
+def cmd_sanctuary(a):
+    script = os.path.join(CONF_DIR, "sanctuary.sh")
+    if not os.path.exists(script):
+        print(f"{CINNABAR}Script {script} não encontrado.{RESET}")
+        return 1
+    return subprocess.run([script]).returncode
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="dragonctl", description="CLI unificada de IA do Dragon OS")
+    p = argparse.ArgumentParser(prog="dragonctl",
+                                description=f"🐉 dragonctl (龙控) - Orquestrador Central do Dragon OS v{VERSION}")
     p.add_argument("--version", action="version", version=f"dragonctl {VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -930,28 +1150,46 @@ def main(argv=None):
     k.add_argument("text", nargs="*")
     k.set_defaults(fn=cmd_ask)
 
-    s = sub.add_parser("search", help="Busca semântica no Scales")
+    sc = sub.add_parser("scales", help="Busca semântica ou reindexação do módulo Scales (RAG)")
+    sc.add_argument("scales_action", choices=["search", "reindex"], help="Ação do Scales")
+    sc.add_argument("query", nargs="*", help="Termo de busca semântica")
+    sc.add_argument("-k", "--top-k", type=int, default=4, help="Número de resultados (padrão: 4)")
+    sc.add_argument("--json", action="store_true", help="Retorna saída em JSON puro")
+    sc.set_defaults(fn=cmd_scales)
+
+    s = sub.add_parser("search", help="Atalho para 'scales search'")
     s.add_argument("-k", "--top-k", type=int, default=4)
     s.add_argument("--json", action="store_true")
     s.add_argument("query", nargs="+")
     s.set_defaults(fn=cmd_search)
 
-    i = sub.add_parser("index", help="Indexa arquivos (ou tudo com --all)")
+    i = sub.add_parser("index", help="Indexa arquivos específicos (ou tudo com --all)")
     i.add_argument("--all", action="store_true")
     i.add_argument("paths", nargs="*")
     i.set_defaults(fn=cmd_index)
 
-    sub.add_parser("watch", help="Indexação contínua via inotify").set_defaults(fn=cmd_watch)
+    sub.add_parser("watch", help="Indexação contínua via inotify (serviço)").set_defaults(fn=cmd_watch)
 
-    e = sub.add_parser("evict", help="Descarrega todos os modelos da VRAM")
+    st = sub.add_parser("status", help="Exibe telemetria de VRAM, modelos e daemons")
+    st.add_argument("--waybar", action="store_true", help="Saída JSON formatada para a Waybar")
+    st.set_defaults(fn=cmd_status)
+
+    e = sub.add_parser("evict", help="Descarrega todos os modelos da VRAM imediatamente")
+    e.add_argument("-q", "--quiet", action="store_true", help="Não envia notificação desktop")
     e.add_argument("--reason", default="Pedido manual")
     e.set_defaults(fn=cmd_evict)
 
-    w = sub.add_parser("warmup", help="Pré-carrega o modelo do Tier")
+    m = sub.add_parser("model", help="Lista ou troca o modelo padrão do Dragon OS")
+    m.add_argument("name", nargs="?", help="Nome do modelo no Ollama (ex: qwen2.5-coder:7b)")
+    m.add_argument("-w", "--warmup", action="store_true", help="Já carrega o modelo na VRAM")
+    m.add_argument("--reset", action="store_true", help="Volta ao modelo definido pelo Tier")
+    m.set_defaults(fn=cmd_model)
+
+    w = sub.add_parser("warmup", help="Pré-carrega o modelo padrão na memória")
     w.add_argument("--model")
     w.set_defaults(fn=cmd_warmup)
 
-    sub.add_parser("status", help="Estado do sistema de IA").set_defaults(fn=cmd_status)
+    sub.add_parser("sanctuary", help="Alterna o Modo Santuário (Foco Profundo)").set_defaults(fn=cmd_sanctuary)
 
     a = p.parse_args(argv)
     return a.fn(a)

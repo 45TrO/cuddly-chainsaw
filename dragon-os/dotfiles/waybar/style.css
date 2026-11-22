@@ -66,6 +66,11 @@ window#waybar {
     color: #00A86B;
 }
 
+#custom-dragond.offline {
+    border-color: #E34234;
+    color: #E34234;
+}
+
 #custom-dragond.active {
     border-color: #D4AF37;
     color: #D4AF37; /* Fica dourado quando há um modelo carregado na VRAM */

@@ -123,7 +123,12 @@ gcai() {
     fi
 }
 
-# 7. Boas-vindas com fastfetch no primeiro shell interativo (DRAGON_NO_FETCH=1 desativa)
+# 7. Atalhos curtos do dragonctl
+alias dstat='dragonctl status'
+alias devict='dragonctl evict'
+alias dsearch='dragonctl scales search'
+
+# 8. Boas-vindas com fastfetch no primeiro shell interativo (DRAGON_NO_FETCH=1 desativa)
 if [[ -o interactive && -z "$DRAGON_NO_FETCH" && "$SHLVL" -le 1 ]] && command -v fastfetch >/dev/null 2>&1; then
     fastfetch
 fi
