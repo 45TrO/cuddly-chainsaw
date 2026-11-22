@@ -1,0 +1,7 @@
+// Módulo opcional para ~/.config/waybar/config.jsonc
+// Estilo sugerido (style.css): #custom-whisper.recording { color: #E34234; }
+"custom/whisper": {
+    "exec": "if [ -f /tmp/whispering_wind.pid ]; then echo '{\"text\": \"🎙️ Lóng\", \"class\": \"recording\"}'; else echo '{\"text\": \"\", \"class\": \"idle\"}'; fi",
+    "return-type": "json",
+    "interval": 1
+}
