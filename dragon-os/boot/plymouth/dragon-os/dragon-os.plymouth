@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Dragon OS
+Description=Abertura Ink & Jade: nanquim se espalha e o dragão de jade nasce da fumaça
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/dragon-os
+ScriptFile=/usr/share/plymouth/themes/dragon-os/dragon-os.script

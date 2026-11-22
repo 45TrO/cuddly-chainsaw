@@ -1,0 +1,12 @@
+[Unit]
+Description=Dragon OS Core Daemon (Hardware Tier & VRAM Manager)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.config/dragon-breath/dragond.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

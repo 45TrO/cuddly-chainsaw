@@ -1,0 +1,1199 @@
+#!/usr/bin/env python3
+"""
+dragonctl (龙控) - Orquestrador Unificado do Dragon OS v1.5
+
+Substitui breath.py, dragon_eye.py, scales_search.py e scales_indexer.py, e
+gerencia VRAM, modelos Ollama, busca vetorial (Scales), telemetria e Santuário.
+Todos os subcomandos compartilham um único cliente Ollama, que mantém a
+conexão HTTP aberta (keep-alive) durante toda a execução do comando.
+
+  dragonctl status [--waybar]            Painel de telemetria (ou JSON para a Waybar)
+  dragonctl evict [-q]                   Descarrega todos os modelos da VRAM
+  dragonctl model [NOME] [-w] [--reset]  Lista ou troca o modelo global
+  dragonctl scales search|reindex        Busca semântica / reindexação do Scales
+  dragonctl sanctuary                    Alterna o Modo Santuário
+  dragonctl breath                       Launcher IA no Rofi ('@' clipboard, '#' Scales)
+  dragonctl eye                          Dragon Eye: captura de tela + OCR / visão local
+  dragonctl gen [-m MODO] TEXTO          Geração direta (usada pelo Zsh e pelo Hoard)
+  dragonctl ask TEXTO                    Pergunta com streaming no terminal
+  dragonctl index [--all | ARQ…]         Indexa arquivos específicos ou varre tudo
+  dragonctl watch                        Indexação contínua via inotify (serviço)
+  dragonctl warmup                       Pré-carrega o modelo padrão na memória
+"""
+import argparse
+import base64
+import html
+import http.client
+import json
+import os
+import re
+import select
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+VERSION = "1.5"
+
+HOME = os.path.expanduser("~")
+CONF_DIR = os.path.join(HOME, ".config", "dragon-breath")
+ENV_FILE = os.path.join(CONF_DIR, "dragon_env.sh")
+PROMPTS_FILE = os.path.join(CONF_DIR, "prompts.json")
+ROFI_THEME = os.path.join(CONF_DIR, "config.rasi")
+STATE_FILE = "/tmp/dragon_state.json"  # escrito pelo dragond
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+SCALES_STATUS = os.path.join(RUNTIME_DIR, "dragon_scales.json")  # lido pela Waybar
+DB_PATH = os.path.join(HOME, ".local", "share", "dragon-scales", "scales.db")
+
+EMBED_MODEL = "nomic-embed-text"
+WATCH_DIRS = [os.path.join(HOME, "Documentos"), os.path.join(HOME, "Projetos")]
+CODE_EXTS = {".py", ".rs", ".c", ".cpp", ".js", ".ts", ".sh", ".md", ".txt", ".toml", ".json"}
+INDEX_EXTS = CODE_EXTS | {".pdf"}
+IGNORE_DIRS = {".git", "node_modules", "target", "__pycache__", ".venv", "build"}
+DEBOUNCE_S = 2.0   # editores gravam o arquivo várias vezes seguidas
+RETRY_S = 30.0     # nova tentativa quando o Ollama está fora do ar
+SCORE_THRESHOLD = 0.32  # similaridade mínima de um trecho do Scales
+
+WHISPER_URL = "http://127.0.0.1:8178"
+SANCTUARY_LOCK = "/tmp/dragon_sanctuary.lock"
+# Modelo escolhido com 'dragonctl model'; o dragond o respeita no lugar do modelo do Tier
+MODEL_OVERRIDE = os.path.join(CONF_DIR, "model.override")
+
+# Paleta ANSI Ink & Jade
+JADE = "\033[38;2;0;168;107m"
+GOLD = "\033[38;2;212;175;55m"
+CINNABAR = "\033[38;2;227;66;52m"
+MIST = "\033[38;2;122;132;144m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+DEFAULT_PROMPTS = {
+    "breath": (
+        "Você é o Dragon Breath, a IA integrada ao Dragon OS (Linux/Wayland). "
+        "Seja extremamente direto, conciso e técnico. "
+        "Se o usuário pedir um comando Linux, retorne APENAS o comando na primeira linha, "
+        "seguido de uma explicação de no máximo 1 linha."
+    ),
+    "shell": (
+        "Você é o gerador de comandos Zsh/Linux do Dragon OS (Arch Linux). Retorne EXCLUSIVAMENTE "
+        "o comando executável em uma única linha, sem blocos markdown, sem crases e sem explicações. "
+        "Prefira ferramentas modernas (fd, rg, eza, ffmpeg, git, pacman) quando apropriado."
+    ),
+    "wtf": (
+        "Seja cirúrgico e direto. Responda em português no formato:\n"
+        "Causa: <explicação curta>\nCorreção: <comando corrigido>"
+    ),
+    "commit": (
+        "Analise o git diff recebido e escreva APENAS uma mensagem de commit concisa seguindo o "
+        "padrão Conventional Commits (ex: feat(escopo): descrição curta em português). "
+        "Sem aspas, sem markdown, apenas 1 linha."
+    ),
+    "hoard": (
+        "Aplique a ação pedida ao conteúdo recebido. Retorne APENAS o resultado final pronto para "
+        "colar, sem explicações e sem blocos markdown desnecessários."
+    ),
+}
+
+
+# ============================================================================
+# Configuração: modelos do Tier e prompts
+# ============================================================================
+
+def _read_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_env_file():
+    values = {}
+    try:
+        with open(ENV_FILE) as f:
+            for line in f:
+                m = re.match(r'\s*export\s+(\w+)="(.*)"\s*$', line)
+                if m:
+                    values[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return values
+
+
+def read_model_override():
+    try:
+        with open(MODEL_OVERRIDE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def default_model():
+    """'dragonctl model' -> ambiente -> estado do dragond -> dragon_env.sh -> modelo mínimo.
+
+    A escolha manual vem antes do ambiente porque shells já abertos guardam o DRAGON_MODEL antigo.
+    """
+    return (read_model_override()
+            or os.environ.get("DRAGON_MODEL")
+            or _read_state().get("default_model")
+            or _read_env_file().get("DRAGON_MODEL")
+            or "qwen2.5-coder:1.5b")
+
+
+def vision_model():
+    return (os.environ.get("DRAGON_VISION_MODEL")
+            or _read_state().get("vision_model")
+            or _read_env_file().get("DRAGON_VISION_MODEL")
+            or "moondream")
+
+
+def load_prompts():
+    """Prompts embutidos, sobrescritos por ~/.config/dragon-breath/prompts.json se existir.
+
+    Aceita {"modo": "texto"} ou {"modo": {"system": "texto"}}.
+    """
+    prompts = dict(DEFAULT_PROMPTS)
+    try:
+        with open(PROMPTS_FILE) as f:
+            for key, val in json.load(f).items():
+                if isinstance(val, dict):
+                    val = val.get("system")
+                if isinstance(val, str) and val.strip():
+                    prompts[key.lower()] = val
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[dragonctl] prompts.json ignorado: {e}", file=sys.stderr)
+    return prompts
+
+
+# ============================================================================
+# Cliente Ollama com conexão persistente
+# ============================================================================
+
+class OllamaError(Exception):
+    pass
+
+
+def _ollama_host():
+    host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
+    host = re.sub(r"^https?://", "", host).rstrip("/")
+    if host.startswith("0.0.0.0"):
+        host = "127.0.0.1" + host[len("0.0.0.0"):]
+    if ":" not in host:
+        host += ":11434"
+    return host
+
+
+class Ollama:
+    """Um único socket HTTP/1.1 reaproveitado por todas as chamadas do processo."""
+
+    def __init__(self, host=None):
+        self.host = host or _ollama_host()
+        self._conn = None
+
+    def close(self):
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _open(self, timeout):
+        if self._conn is None:
+            self._conn = http.client.HTTPConnection(self.host, timeout=timeout)
+        else:
+            self._conn.timeout = timeout
+            if self._conn.sock is not None:
+                self._conn.sock.settimeout(timeout)
+        return self._conn
+
+    def _send(self, path, body, timeout):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        method = "POST" if body is not None else "GET"
+        for attempt in range(2):
+            conn = self._open(timeout)
+            try:
+                conn.request(method, path, body=data, headers={"Content-Type": "application/json"})
+                return conn.getresponse()
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError) as e:
+                # O servidor fechou a conexão keep-alive ociosa: reabre uma única vez
+                self.close()
+                if attempt:
+                    raise OllamaError(f"Ollama indisponível em {self.host}: {e}") from e
+            except OSError as e:
+                self.close()
+                raise OllamaError(f"Ollama indisponível em {self.host}: {e}") from e
+
+    def call(self, path, body=None, timeout=60):
+        resp = self._send(path, body, timeout)
+        try:
+            raw = resp.read()
+        except OSError as e:
+            self.close()
+            raise OllamaError(f"Falha lendo resposta do Ollama: {e}") from e
+        if resp.status >= 400:
+            raise OllamaError(f"Ollama HTTP {resp.status}: {raw[:300].decode('utf-8', 'replace')}")
+        return json.loads(raw or b"{}")
+
+    def stream(self, path, body, timeout=120):
+        resp = self._send(path, body, timeout)
+        if resp.status >= 400:
+            raw = resp.read()
+            raise OllamaError(f"Ollama HTTP {resp.status}: {raw[:300].decode('utf-8', 'replace')}")
+        try:
+            for line in resp:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+        except OSError as e:
+            self.close()
+            raise OllamaError(f"Streaming interrompido: {e}") from e
+
+    def generate(self, prompt, system=None, model=None, images=None, options=None,
+                 keep_alive="30m", timeout=60):
+        body = {
+            "model": model or default_model(),
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": keep_alive,
+            "options": options or {},
+        }
+        if system:
+            body["system"] = system
+        if images:
+            body["images"] = images
+        return self.call("/api/generate", body, timeout).get("response", "").strip()
+
+    def embed(self, texts, timeout=60, keep_alive="5m"):
+        data = self.call("/api/embed", {"model": EMBED_MODEL, "input": texts, "keep_alive": keep_alive}, timeout)
+        return data["embeddings"]
+
+    def running(self, timeout=3):
+        """Modelos na memória: [{'name', 'size_mb'}] (size_vram quando há GPU)."""
+        return [{"name": m["name"],
+                 "size_mb": round(m.get("size_vram") or m.get("size", 0)) // (1024 * 1024)}
+                for m in self.call("/api/ps", None, timeout).get("models", [])]
+
+    def loaded_models(self):
+        return [m["name"] for m in self.running()]
+
+    def installed_models(self):
+        return [m["name"] for m in self.call("/api/tags", None, 5).get("models", [])]
+
+    def unload(self, model):
+        self.call("/api/generate", {"model": model, "keep_alive": 0}, 15)
+
+
+# ============================================================================
+# Utilidades de desktop (Rofi, notificações, clipboard)
+# ============================================================================
+
+def notify(title, body, urgency="low", timeout_ms=3500, tag="dragonctl"):
+    if shutil.which("notify-send"):
+        subprocess.Popen(["notify-send", "-u", urgency, "-t", str(timeout_ms),
+                          "-h", f"string:x-canonical-private-synchronous:{tag}", title, body])
+
+
+def rofi(prompt, message="", options=None):
+    cmd = ["rofi", "-dmenu", "-p", prompt, "-theme", ROFI_THEME]
+    if message:
+        # -mesg interpreta Pango markup: '<', '>' e '&' (ex.: "2>&1") quebrariam a mensagem
+        cmd += ["-mesg", html.escape(message, quote=False)]
+    proc = subprocess.run(cmd, input="\n".join(options or []), text=True, capture_output=True)
+    return proc.stdout.strip()
+
+
+def clipboard_text(limit=1000):
+    try:
+        res = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True, timeout=0.5)
+        return res.stdout.strip()[:limit]
+    except Exception:
+        return ""
+
+
+def copy_text(text):
+    subprocess.run(["wl-copy"], input=text, text=True)
+
+
+def terminal():
+    return os.environ.get("DRAGON_TERMINAL", "ghostty")
+
+
+def one_line(text):
+    """Primeira linha útil de uma resposta, sem cercas markdown nem crases."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("```"):
+            continue
+        return line.replace("`", "").strip()
+    return ""
+
+
+# ============================================================================
+# Dragon Scales: índice vetorial local (SQLite + embeddings)
+# ============================================================================
+
+def db_connect():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")    # sem isso o ON DELETE CASCADE é ignorado
+    conn.execute("PRAGMA journal_mode = WAL")   # buscas não bloqueiam durante a indexação
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS files (
+            path TEXT PRIMARY KEY,
+            mtime REAL
+        );
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT,
+            chunk_index INTEGER,
+            content TEXT,
+            embedding BLOB,
+            FOREIGN KEY(path) REFERENCES files(path) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+    """)
+    return conn
+
+
+def set_scales_status(state, detail=""):
+    """Estado para a Waybar (gravação atômica em $XDG_RUNTIME_DIR)."""
+    labels = {"indexing": "⚡ Indexando", "ready": "鱗 Scales", "offline": "鱗 Ollama off"}
+    data = {"text": labels.get(state, state), "class": state, "tooltip": detail or labels.get(state, state)}
+    tmp = SCALES_STATUS + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, SCALES_STATUS)
+    except OSError:
+        pass
+
+
+def is_indexable(path):
+    if os.path.splitext(path)[1].lower() not in INDEX_EXTS:
+        return False
+    return not any(part in IGNORE_DIRS for part in path.split(os.sep))
+
+
+def iter_files(base):
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        for name in files:
+            path = os.path.join(root, name)
+            if is_indexable(path):
+                yield path
+
+
+def extract_text(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        import fitz  # PyMuPDF (import tardio: só quem indexa PDF paga o custo)
+        with fitz.open(path) as doc:
+            return "\n".join(page.get_text("text") for page in doc)
+    if ext in CODE_EXTS:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    return ""
+
+
+def chunk_text(text, size=800, overlap=150):
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunk = text[start:start + size].strip()
+        if len(chunk) > 40:  # Ignora fragmentos muito pequenos
+            chunks.append(chunk)
+        start += size - overlap
+    return chunks
+
+
+def index_file(conn, ol, path, mtime=None):
+    """Indexa um arquivo de forma atômica: ou entra tudo, ou nada muda."""
+    import numpy as np
+    if mtime is None:
+        mtime = os.path.getmtime(path)
+    chunks = chunk_text(extract_text(path))
+
+    # Gera todos os embeddings ANTES de tocar no banco
+    rows = []
+    for i in range(0, len(chunks), 32):
+        batch = chunks[i:i + 32]
+        # O nome do arquivo no texto melhora a precisão semântica
+        contextual = [f"Arquivo: {os.path.basename(path)}\n{ch}" for ch in batch]
+        for idx, (ch, vec) in enumerate(zip(batch, ol.embed(contextual))):
+            emb = np.asarray(vec, dtype=np.float32)
+            emb = emb / (np.linalg.norm(emb) + 1e-10)
+            rows.append((path, i + idx, ch, emb.tobytes()))
+
+    try:
+        # UPSERT (e não INSERT OR REPLACE): REPLACE apagaria a linha-pai e,
+        # com foreign_keys=ON, derrubaria os chunks em cascata.
+        conn.execute(
+            "INSERT INTO files (path, mtime) VALUES (?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime",
+            (path, mtime),
+        )
+        conn.execute("DELETE FROM chunks WHERE path = ?", (path,))
+        conn.executemany(
+            "INSERT INTO chunks (path, chunk_index, content, embedding) VALUES (?, ?, ?, ?)", rows
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(rows)
+
+
+def remove_paths(conn, paths):
+    rows = [(p,) for p in paths]
+    if rows:
+        conn.executemany("DELETE FROM chunks WHERE path = ?", rows)
+        conn.executemany("DELETE FROM files WHERE path = ?", rows)
+        conn.commit()
+    return len(rows)
+
+
+def remove_prefix(conn, directory):
+    prefix = directory.rstrip(os.sep) + os.sep
+    paths = [p for (p,) in conn.execute("SELECT path FROM files") if p.startswith(prefix)]
+    return remove_paths(conn, paths)
+
+
+def needs_index(conn, path):
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False, None
+    row = conn.execute("SELECT mtime FROM files WHERE path = ?", (path,)).fetchone()
+    return (not row or row[0] < mtime), mtime
+
+
+def scan(conn, ol, dirs, log=print):
+    """Varredura incremental (por mtime) + remoção de arquivos que sumiram."""
+    seen, scanned, done, failed = set(), [], 0, 0
+    for base in dirs:
+        if not os.path.isdir(base):
+            continue  # pode estar desmontado: não apaga o que já foi indexado dele
+        scanned.append(base)
+        for path in iter_files(base):
+            seen.add(path)
+            todo, mtime = needs_index(conn, path)
+            if not todo:
+                continue
+            log(f"[Scales] Indexando: {path}")
+            try:
+                index_file(conn, ol, path, mtime)
+                done += 1
+            except OllamaError:
+                raise  # sem Ollama não adianta insistir arquivo por arquivo
+            except Exception as e:
+                failed += 1
+                log(f"[Scales] Falha em {path}: {e}")
+
+    stale = [p for (p,) in conn.execute("SELECT path FROM files")
+             if p not in seen and any(p.startswith(d.rstrip(os.sep) + os.sep) for d in scanned)]
+    removed = remove_paths(conn, stale)
+    return done, failed, removed
+
+
+def scales_search(ol, query, top_k=4, threshold=SCORE_THRESHOLD):
+    if not os.path.exists(DB_PATH):
+        return []
+    import numpy as np
+    q = np.asarray(ol.embed([query], timeout=10, keep_alive="15m")[0], dtype=np.float32)
+    q = q / (np.linalg.norm(q) + 1e-10)
+
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        rows = conn.execute("SELECT path, content, embedding FROM chunks").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return []
+
+    matrix = np.frombuffer(b"".join(r[2] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+    scores = matrix @ q
+    results = []
+    for idx in np.argsort(scores)[::-1][:top_k]:
+        if scores[idx] > threshold:  # Filtro mínimo de relevância
+            path, content, _ = rows[idx]
+            results.append({"file": os.path.basename(path), "path": path,
+                            "score": float(scores[idx]), "content": content})
+    return results
+
+
+# ============================================================================
+# Subcomandos
+# ============================================================================
+
+def cmd_gen(a):
+    prompts = load_prompts()
+    if a.mode and a.mode not in prompts and not a.system:
+        print(f"Modo desconhecido: {a.mode} (disponíveis: {', '.join(sorted(prompts))})", file=sys.stderr)
+        return 2
+    system = a.system or (prompts[a.mode] if a.mode else None)
+
+    text = " ".join(a.text).strip()
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        if piped.strip():
+            text = f"{text}\n\n{piped}" if text else piped
+    if not text:
+        print("Nada para enviar ao modelo.", file=sys.stderr)
+        return 2
+
+    options = {"temperature": a.temperature}
+    if a.max_tokens:
+        options["num_predict"] = a.max_tokens
+    try:
+        out = Ollama().generate(text, system=system, model=a.model, options=options, timeout=a.timeout)
+    except OllamaError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if a.one_line:
+        out = one_line(out)
+    print(out)
+    return 0 if out else 1
+
+
+def cmd_ask(a):
+    prompt = " ".join(a.text).strip()
+    if not prompt:
+        print("Uso: dragonctl ask <sua pergunta técnica>", file=sys.stderr)
+        return 1
+    model = a.model or default_model()
+    body = {"model": model, "prompt": prompt, "stream": True, "keep_alive": "30m",
+            "options": {"temperature": 0.2}}
+    sys.stdout.write(f"\033[38;2;0;168;107m🐉 [{model}]: \033[0m")
+    sys.stdout.flush()
+    try:
+        for part in Ollama().stream("/api/generate", body):
+            sys.stdout.write(part.get("response", ""))
+            sys.stdout.flush()
+    except OllamaError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
+    print()
+    return 0
+
+
+def cmd_breath(a):
+    ol = Ollama()
+    prompts = load_prompts()
+    while True:
+        query = rofi("🐉 Dragon Breath",
+                     "Digite sua consulta ('@' inclui o texto copiado, '#' busca nos seus arquivos)")
+        if not query:
+            return 0
+
+        sources = []
+        if query.startswith("#"):
+            clean = query[1:].strip()
+            try:
+                sources = scales_search(ol, clean, top_k=4)
+            except (OllamaError, sqlite3.Error) as e:
+                # Ollama fora do ar / índice indisponível: segue sem contexto
+                query = f"(Aviso: falha ao consultar o índice Scales: {e}) {clean}"
+            else:
+                if sources:
+                    blocks = "\n\n---\n".join(
+                        f"[{s['file']}] (Relevância: {s['score']:.2f}):\n{s['content']}" for s in sources)
+                    query = ("Use os seguintes trechos dos arquivos locais do usuário para responder.\n"
+                             "Cite o nome do arquivo entre colchetes.\n\n"
+                             f"{blocks}\n\nPergunta: {clean}")
+                else:
+                    query = f"(Aviso: Nenhum arquivo relevante encontrado no índice Scales) {clean}"
+        elif query.startswith("@"):
+            clean = query[1:].strip()
+            clip = clipboard_text()
+            query = f"Contexto da área de transferência:\n{clip}\n\nPergunta: {clean}" if clip else clean
+
+        try:
+            answer = ol.generate(query, system=prompts["breath"],
+                                 options={"temperature": 0.1, "num_predict": 250}, timeout=30)
+        except OllamaError as e:
+            answer = f"Erro ao conectar ao Ollama: {e}"
+        answer = answer or "Sem resposta do modelo."
+        first_line = answer.split("\n")[0].strip("` ")
+
+        actions = [
+            "📋 Copiar resposta completa",
+            f"⚡ Copiar 1ª linha ({first_line[:40]}...)",
+            f"🖥️ Executar no terminal: {first_line[:40]}...",
+            "🔄 Nova pergunta",
+        ]
+        if sources:
+            actions.insert(0, f"📂 Abrir fonte principal: {sources[0]['file']}")
+
+        choice = rofi("🐉 Ação", answer, actions)
+        if choice.startswith("📂"):
+            subprocess.Popen(["xdg-open", sources[0]["path"]])
+        elif choice.startswith("📋"):
+            copy_text(answer)
+        elif choice.startswith("⚡"):
+            copy_text(first_line)
+        elif choice.startswith("🖥️"):
+            # Abre o terminal executando o comando e mantendo a sessão aberta
+            subprocess.Popen([terminal(), "-e", "sh", "-c", f"{first_line}; exec zsh"])
+        elif choice.startswith("🔄"):
+            continue
+        return 0
+
+
+EYE_MODES = [
+    ("⚡ OCR Instantâneo (Extrair texto/código puro)", None),
+    ("📊 Explicar gráfico, diagrama ou imagem (IA)",
+     "Analise esta imagem em detalhes, mas de forma direta e técnica em português. "
+     "Se for um gráfico ou erro, explique os pontos principais."),
+    ("📝 Converter tabela/equação para Markdown/LaTeX (IA)",
+     "Extraia qualquer tabela desta imagem para formato Markdown limpo, ou converta equações "
+     "matemáticas para LaTeX. Retorne apenas o resultado formatado."),
+    ("🌐 Traduzir texto da imagem para Português (IA)",
+     "Traduza todo o texto visível nesta imagem para o português mantendo a formatação original."),
+    ("💻 Gerar código HTML/Tailwind desta interface (IA)",
+     "Escreva o código HTML + Tailwind CSS que reproduz fielmente este componente de interface."),
+    ("🖼️ Apenas copiar imagem para o Clipboard", None),
+]
+
+
+def _eye_capture(path):
+    """Seletor slurp com borda Verde Jade (#00A86B) e fundo Nanquim."""
+    res = subprocess.run(["slurp", "-b", "0D0F1266", "-c", "00A86BFF", "-s", "00000000", "-w", "2"],
+                         capture_output=True, text=True)
+    region = res.stdout.strip()
+    if not region:
+        return False  # Usuário cancelou com ESC
+    subprocess.run(["grim", "-g", region, path], check=True)
+    return True
+
+
+def _eye_ocr(path):
+    if not shutil.which("tesseract"):
+        return "Erro: 'tesseract' não instalado."
+    res = subprocess.run(["tesseract", path, "stdout", "-l", "por+eng", "--psm", "6"],
+                         capture_output=True, text=True)
+    return res.stdout.strip() or "Nenhum texto detectado pelo OCR."
+
+
+def _eye_vision(ol, path, prompt):
+    model = vision_model()
+    notify("👁️ Dragon Eye", f"Analisando imagem com {model}...", tag="dragon_eye")
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    try:
+        return ol.generate(prompt, model=model, images=[b64], keep_alive="10m",
+                           options={"temperature": 0.1, "num_predict": 400}, timeout=45) \
+            or "Sem resposta do modelo de visão."
+    except OllamaError as e:
+        return f"Erro ao consultar modelo de visão ({model}): {e}\nCertifique-se de ter rodado: ollama pull {model}"
+
+
+def cmd_eye(a):
+    ol = Ollama()
+    # Captura vai para $XDG_RUNTIME_DIR (0700, só do usuário), não para o /tmp compartilhado
+    fd, shot = tempfile.mkstemp(prefix="dragon_eye_", suffix=".png", dir=RUNTIME_DIR)
+    os.close(fd)
+    try:
+        try:
+            if not _eye_capture(shot):
+                return 0
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            notify("👁️ Dragon Eye", f"Falha na captura de tela: {e}", urgency="normal", tag="dragon_eye")
+            return 1
+
+        choice = rofi("👁️ Dragon Eye",
+                      "Selecione a ação para a região capturada (ou digite um prompt livre):",
+                      [label for label, _ in EYE_MODES])
+        if not choice:
+            return 0
+
+        if choice.startswith("🖼️"):
+            with open(shot, "rb") as f:
+                subprocess.run(["wl-copy", "--type", "image/png"], input=f.read())
+            notify("👁️ Dragon Eye", "Imagem copiada para a área de transferência!", tag="dragon_eye")
+            return 0
+        if choice.startswith("⚡"):
+            result = _eye_ocr(shot)
+        else:
+            prompt = next((p for label, p in EYE_MODES if p and choice == label), None)
+            # Texto livre digitado no Rofi vira o próprio prompt
+            result = _eye_vision(ol, shot, prompt or choice)
+
+        next_step = rofi("👁️ Resultado", result, [
+            "📋 Copiar resultado para o Clipboard",
+            "🔄 Fazer outra pergunta sobre esta mesma captura",
+            "❌ Fechar",
+        ])
+        if next_step.startswith("📋"):
+            copy_text(result)
+            notify("👁️ Dragon Eye", "Texto copiado para a área de transferência!", tag="dragon_eye")
+        elif next_step.startswith("🔄"):
+            question = rofi("👁️ Pergunta:", "O que você quer saber sobre a captura?")
+            if question:
+                answer = _eye_vision(ol, shot, question)
+                copy_text(answer)
+                rofi("👁️ Resposta (Já copiada!)", answer, ["✅ OK"])
+        return 0
+    finally:
+        try:
+            os.remove(shot)
+        except OSError:
+            pass
+
+
+def cmd_search(a):
+    query = " ".join(a.query).strip()
+    if not query:
+        print(f"{CINNABAR}Informe o termo de busca. Ex: dragonctl scales search 'autenticação jwt'{RESET}")
+        return 1
+    if not os.path.exists(DB_PATH):
+        print(f"{CINNABAR}Banco Scales ainda não existe. Rode 'dragonctl scales reindex'.{RESET}")
+        return 1
+    try:
+        results = scales_search(Ollama(), query, top_k=a.top_k)
+    except (OllamaError, sqlite3.Error) as e:
+        print(f"{CINNABAR}Erro ao consultar o Scales: {e}{RESET}", file=sys.stderr)
+        return 1
+
+    if a.json:
+        for r in results:
+            r["score"] = round(r["score"], 3)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"\n{JADE}{BOLD}🐉 Resultados no Dragon Scales para:{RESET} '{GOLD}{query}{RESET}'\n")
+    if not results:
+        print(f"  {MIST}Nenhum trecho relevante encontrado (score >= {SCORE_THRESHOLD}).{RESET}\n")
+        return 0
+    for i, r in enumerate(results, 1):
+        snippet = r["content"].replace("\n", " ")[:180]
+        print(f"  {BOLD}{i}. [{JADE}{r['file']}{RESET}{BOLD}]{RESET} {GOLD}(Similaridade: {r['score']:.3f}){RESET}")
+        print(f"     {MIST}Caminho:{RESET} {r['path']}")
+        print(f"     \"{snippet}...\"\n")
+    return 0
+
+
+def cmd_scales(a):
+    """'dragonctl scales search ...' / 'dragonctl scales reindex' (interface da 1.5)."""
+    if a.scales_action == "reindex":
+        print(f"{JADE}⚡ Iniciando indexação incremental do Dragon Scales...{RESET}")
+        a.all, a.paths = True, []
+        return cmd_index(a)
+    return cmd_search(a)
+
+
+def cmd_index(a):
+    ol = Ollama()
+    conn = db_connect()
+    status = "ready"
+    try:
+        if a.all or not a.paths:
+            set_scales_status("indexing", "Varredura completa")
+            done, failed, removed = scan(conn, ol, WATCH_DIRS)
+            print(f"[Scales] {done} indexado(s), {failed} falha(s), {removed} removido(s).")
+            return 0 if not failed else 1
+        rc = 0
+        for p in a.paths:
+            p = os.path.abspath(p)
+            if not os.path.exists(p):
+                remove_paths(conn, [p])
+            elif os.path.isdir(p):
+                for f in iter_files(p):
+                    index_file(conn, ol, f)
+            elif is_indexable(p):
+                print(f"[Scales] {index_file(conn, ol, p)} trecho(s): {p}")
+            else:
+                print(f"[Scales] Tipo não indexável: {p}", file=sys.stderr)
+                rc = 1
+        return rc
+    except OllamaError as e:
+        print(f"[Scales] Ollama indisponível: {e}", file=sys.stderr)
+        status = "offline"
+        return 1
+    finally:
+        conn.close()
+        set_scales_status(status)
+
+
+def cmd_watch(a):
+    """Indexação sob demanda: só reindexa o arquivo que acabou de ser salvo."""
+    if not shutil.which("inotifywait"):
+        print("[Scales] inotifywait não encontrado (instale inotify-tools).", file=sys.stderr)
+        return 1
+    dirs = [d for d in WATCH_DIRS if os.path.isdir(d)]
+    if not dirs:
+        print("[Scales] Nenhuma pasta monitorada existe; nada a fazer.")
+        set_scales_status("ready", "Nenhuma pasta monitorada")
+        return 0
+
+    ol = Ollama()
+    conn = db_connect()
+    pending = {}  # caminho -> instante em que pode ser processado
+
+    # Recupera o que mudou enquanto o serviço estava parado (só arquivos com mtime novo)
+    set_scales_status("indexing", "Sincronizando alterações offline")
+    try:
+        done, failed, removed = scan(conn, ol, dirs)
+        print(f"[Scales] Sincronização inicial: {done} indexado(s), {failed} falha(s), {removed} removido(s).")
+        set_scales_status("ready")
+    except OllamaError as e:
+        print(f"[Scales] Ollama indisponível na partida, reagendando: {e}")
+        set_scales_status("offline", str(e))
+        for base in dirs:
+            for path in iter_files(base):
+                pending[path] = time.monotonic() + RETRY_S
+
+    ignore_re = r"(^|/)(" + "|".join(re.escape(d) for d in sorted(IGNORE_DIRS)) + r")(/|$)"
+    proc = subprocess.Popen(
+        ["inotifywait", "-m", "-r", "-q", "--exclude", ignore_re,
+         "-e", "close_write,moved_to,delete,moved_from", "--format", "%e\t%w%f", *dirs],
+        stdout=subprocess.PIPE,
+    )
+    fd = proc.stdout.fileno()
+    buf = b""
+    print(f"[Scales] Monitorando: {', '.join(dirs)}")
+
+    try:
+        while True:
+            ready, _, _ = select.select([fd], [], [], 1.0)
+            if ready:
+                data = os.read(fd, 65536)
+                if not data:
+                    print("[Scales] inotifywait terminou.", file=sys.stderr)
+                    return 1
+                buf += data
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    events, _, path = raw.decode("utf-8", "surrogateescape").partition("\t")
+                    if not path:
+                        continue
+                    if "ISDIR" in events:
+                        if "DELETE" in events or "MOVED_FROM" in events:
+                            remove_prefix(conn, path)
+                        elif "MOVED_TO" in events:
+                            for f in iter_files(path):  # pasta movida para dentro: indexa o conteúdo
+                                pending[f] = time.monotonic() + DEBOUNCE_S
+                        continue
+                    if is_indexable(path):
+                        pending[path] = time.monotonic() + DEBOUNCE_S
+
+            now = time.monotonic()
+            due = [p for p, t in pending.items() if t <= now]
+            if not due:
+                continue
+            set_scales_status("indexing", f"{len(due)} arquivo(s)")
+            offline = False
+            for path in due:
+                pending.pop(path, None)
+                try:
+                    if not os.path.exists(path):
+                        remove_paths(conn, [path])
+                        continue
+                    todo, mtime = needs_index(conn, path)
+                    if todo:
+                        n = index_file(conn, ol, path, mtime)
+                        print(f"[Scales] {n} trecho(s): {path}")
+                except OllamaError as e:
+                    print(f"[Scales] Ollama indisponível, nova tentativa em {RETRY_S:.0f}s: {e}")
+                    offline = True
+                    # Reagenda este e os demais do lote sem martelar o Ollama
+                    for rest in due[due.index(path):]:
+                        pending[rest] = time.monotonic() + RETRY_S
+                    set_scales_status("offline", str(e))
+                    break
+                except Exception as e:
+                    print(f"[Scales] Falha em {path}: {e}")
+            if not offline:
+                set_scales_status("ready")
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        proc.terminate()
+        conn.close()
+
+
+def cmd_evict(a):
+    ol = Ollama()
+    try:
+        running = ol.loaded_models()
+    except OllamaError as e:
+        print(f"{CINNABAR}{e}{RESET}", file=sys.stderr)
+        return 1
+
+    if not running:
+        msg = "Nenhum modelo ocupando a VRAM no momento."
+        print(f"{MIST}🐉 {msg}{RESET}")
+        if not a.quiet:
+            notify("🐉 dragonctl", msg)
+        return 0
+
+    evicted = []
+    for name in running:
+        try:
+            ol.unload(name)
+            evicted.append(name)
+        except OllamaError as e:
+            print(f"{CINNABAR}Erro ao descarregar {name}: {e}{RESET}")
+
+    if evicted:
+        joined = ", ".join(evicted)
+        print(f"{JADE}🐉 VRAM liberada com sucesso! Descarregados: {GOLD}{joined}{RESET}")
+        if not a.quiet:
+            notify("🐉 VRAM Liberada", f"Modelos removidos da memória: {joined} — Motivo: {a.reason}")
+    return 0 if len(evicted) == len(running) else 1
+
+
+def cmd_warmup(a):
+    model = a.model or default_model()
+    try:
+        Ollama().call("/api/generate", {"model": model, "keep_alive": "30m"}, timeout=180)
+    except OllamaError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"Modelo pronto na memória: {model}")
+    return 0
+
+
+def load_state():
+    """Estado do dragond; sem ele, valores neutros (não finge um Tier que não foi detectado)."""
+    state = {
+        "tier": "dragond off", "icon": "🐉", "gpu_type": "?",
+        "vram_total_mb": 0, "vram_used_mb": 0, "vram_pct": 0.0, "loaded_models": [],
+    }
+    state.update(_read_state())
+    return state
+
+
+def check_service_online(url):
+    try:
+        urllib.request.urlopen(url, timeout=0.8)
+        return True
+    except urllib.error.HTTPError:
+        return True  # Servidor respondeu (ex: 404 na raiz do whisper-server)
+    except Exception:
+        return False
+
+
+def get_scales_stats():
+    if not os.path.exists(DB_PATH):
+        return 0, 0
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=2)
+        try:
+            files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        finally:
+            conn.close()
+        return files, chunks
+    except sqlite3.Error:
+        return 0, 0
+
+
+def cmd_status(a):
+    state = load_state()
+    model = default_model()
+    try:
+        running = Ollama().running(timeout=1.5)
+        ollama_ok = True
+    except OllamaError:
+        running, ollama_ok = [], False
+    names = [m["name"] for m in running]
+    files, chunks = get_scales_stats()
+    edition = f"{state['tier']} Edition" if _read_state() else "dragond parado"
+
+    if a.waybar:
+        if names:
+            text = f"{state['icon']} {names[0]} ({state['vram_pct']:.0f}%)"
+            cls = "active"
+            models_str = ", ".join(f"{m['name']} ({m['size_mb']} MB)" for m in running)
+        else:
+            text = f"{state['icon']} {state['tier']} · Idle ({state['vram_pct']:.0f}%)"
+            cls = "idle" if ollama_ok else "offline"
+            models_str = "Nenhum modelo na VRAM" if ollama_ok else "Ollama offline"
+        tooltip = (
+            f"🐉 Dragon OS v{VERSION} ({edition})\n"
+            f"──────────────────────────\n"
+            f"GPU/Mem : {state['gpu_type']} ({state['vram_used_mb']}/{state['vram_total_mb']} MB)\n"
+            f"Modelo  : {model}\n"
+            f"Ativos  : {models_str}\n"
+            f"Scales  : {files} arquivos ({chunks} vetores)\n"
+            f"──────────────────────────\n"
+            f"Clique Esquerdo: Dragon Breath\n"
+            f"Clique Direito : Liberar VRAM"
+        )
+        print(json.dumps({"text": text, "tooltip": tooltip, "class": cls}))
+        return 0
+
+    # Exibição rica no terminal
+    whisper_ok = check_service_online(WHISPER_URL)
+    sanctuary_on = os.path.exists(SANCTUARY_LOCK)
+    override = read_model_override()
+    scales = {}
+    try:
+        with open(SCALES_STATUS) as f:
+            scales = json.load(f)
+    except Exception:
+        pass
+
+    print(f"\n{JADE}{BOLD}╭─── 🐉 DRAGON OS v{VERSION} — PAINEL DE CONTROLE (龙控) ───╮{RESET}")
+    print(f"  {BOLD}Edição / Tier :{RESET} {state['icon']} {GOLD}{edition}{RESET} ({state['gpu_type']})")
+    print(f"  {BOLD}Memória VRAM  :{RESET} {state['vram_used_mb']} MB / {state['vram_total_mb']} MB ({GOLD}{state['vram_pct']}%{RESET})")
+    print(f"  {BOLD}Modelo Padrão :{RESET} {JADE}{model}{RESET}{' (manual)' if override else ''} | Visão: {JADE}{vision_model()}{RESET}")
+    print(f"  {BOLD}Modo Santuário:{RESET} {'🧘 Ativo (Foco)' if sanctuary_on else 'Desativado'}")
+    print(f"{MIST}  ─────────────────────────────────────────────────────{RESET}")
+    print(f"  {BOLD}Ollama Daemon :{RESET} {'🟢 Online' if ollama_ok else '🔴 Offline'}")
+    if running:
+        for m in running:
+            print(f"    └─ ⚡ {GOLD}{m['name']}{RESET} ({m['size_mb']} MB alocados)")
+    else:
+        print(f"    └─ {MIST}Zero modelos carregados na VRAM (Idle){RESET}")
+    print(f"  {BOLD}Whisper Wind  :{RESET} {'🟢 Pronto (127.0.0.1:8178)' if whisper_ok else '🔴 Offline'}")
+    print(f"  {BOLD}Dragon Scales :{RESET} 📚 {files} arquivos indexados ({chunks} blocos vetoriais)"
+          f"{' · ' + scales.get('text', '') if scales else ' · monitor parado'}")
+    print(f"{JADE}{BOLD}╰─────────────────────────────────────────────────────╯{RESET}\n")
+    return 0
+
+
+def _with_tag(name):
+    return name if ":" in name else f"{name}:latest"
+
+
+def cmd_model(a):
+    ol = Ollama()
+    try:
+        installed = ol.installed_models()
+    except OllamaError as e:
+        print(f"{CINNABAR}Erro ao consultar Ollama: {e}{RESET}")
+        return 1
+
+    current = default_model()
+    if a.reset:
+        try:
+            os.remove(MODEL_OVERRIDE)
+        except FileNotFoundError:
+            pass
+        tier_model = _read_state().get("tier_model") or _read_env_file().get("DRAGON_MODEL") or "?"
+        print(f"{JADE}✅ Escolha manual removida: o dragond volta a usar o modelo do Tier ({GOLD}{tier_model}{RESET}{JADE}).{RESET}")
+        return 0
+
+    if not a.name:
+        print(f"{JADE}{BOLD}🐉 Modelos Locais Disponíveis no Dragon OS:{RESET}")
+        for name in installed:
+            marker = f"{GOLD}★ [ATIVO]{RESET}" if _with_tag(name) == _with_tag(current) else ""
+            print(f"  • {name} {marker}")
+        print(f"\n{MIST}Use 'dragonctl model <nome>' para alternar o modelo global "
+              f"('dragonctl model --reset' volta ao modelo do Tier).{RESET}")
+        return 0
+
+    target = a.name
+    if _with_tag(target) not in {_with_tag(n) for n in installed}:
+        print(f"{GOLD}⚠️ Modelo '{target}' não encontrado localmente. Baixando via Ollama...{RESET}")
+        try:
+            pulled = subprocess.run(["ollama", "pull", target]).returncode == 0
+        except FileNotFoundError:
+            pulled = False
+        if not pulled:
+            print(f"{CINNABAR}Falha ao baixar '{target}'. Modelo global não alterado.{RESET}")
+            return 1
+
+    # O dragond reescreve dragon_env.sh e o estado a cada 5s: a escolha fica num arquivo
+    # próprio que ele respeita, em vez de ser sobrescrita pelo modelo do Tier.
+    os.makedirs(CONF_DIR, exist_ok=True)
+    with open(MODEL_OVERRIDE, "w") as f:
+        f.write(target + "\n")
+
+    if a.warmup:
+        print(f"{JADE}🔥 Pré-aquecendo {target} na VRAM...{RESET}")
+        try:
+            ol.call("/api/generate", {"model": target, "keep_alive": "30m"}, timeout=180)
+        except OllamaError as e:
+            print(f"{CINNABAR}Falha no pré-aquecimento: {e}{RESET}")
+
+    print(f"{JADE}✅ Modelo global alterado para: {GOLD}{BOLD}{target}{RESET}")
+    notify("🐉 Modelo Alterado", f"Novo cérebro ativo: {target}")
+    return 0
+
+
+def cmd_sanctuary(a):
+    script = os.path.join(CONF_DIR, "sanctuary.sh")
+    if not os.path.exists(script):
+        print(f"{CINNABAR}Script {script} não encontrado.{RESET}")
+        return 1
+    return subprocess.run([script]).returncode
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="dragonctl",
+                                description=f"🐉 dragonctl (龙控) - Orquestrador Central do Dragon OS v{VERSION}")
+    p.add_argument("--version", action="version", version=f"dragonctl {VERSION}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("breath", help="Launcher IA no Rofi").set_defaults(fn=cmd_breath)
+    sub.add_parser("eye", help="Captura de tela + OCR / visão").set_defaults(fn=cmd_eye)
+
+    g = sub.add_parser("gen", help="Geração direta (texto por argumento e/ou stdin)")
+    g.add_argument("-m", "--mode", type=str.lower, help="Prompt de sistema pré-definido (shell, wtf, commit, hoard...)")
+    g.add_argument("-s", "--system", help="Prompt de sistema explícito")
+    g.add_argument("--model")
+    g.add_argument("-t", "--temperature", type=float, default=0.1)
+    g.add_argument("-n", "--max-tokens", type=int)
+    g.add_argument("--timeout", type=float, default=60)
+    g.add_argument("-1", "--one-line", action="store_true", help="Retorna só a primeira linha útil")
+    g.add_argument("text", nargs="*")
+    g.set_defaults(fn=cmd_gen)
+
+    k = sub.add_parser("ask", help="Pergunta com streaming")
+    k.add_argument("--model")
+    k.add_argument("text", nargs="*")
+    k.set_defaults(fn=cmd_ask)
+
+    sc = sub.add_parser("scales", help="Busca semântica ou reindexação do módulo Scales (RAG)")
+    sc.add_argument("scales_action", choices=["search", "reindex"], help="Ação do Scales")
+    sc.add_argument("query", nargs="*", help="Termo de busca semântica")
+    sc.add_argument("-k", "--top-k", type=int, default=4, help="Número de resultados (padrão: 4)")
+    sc.add_argument("--json", action="store_true", help="Retorna saída em JSON puro")
+    sc.set_defaults(fn=cmd_scales)
+
+    s = sub.add_parser("search", help="Atalho para 'scales search'")
+    s.add_argument("-k", "--top-k", type=int, default=4)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("query", nargs="+")
+    s.set_defaults(fn=cmd_search)
+
+    i = sub.add_parser("index", help="Indexa arquivos específicos (ou tudo com --all)")
+    i.add_argument("--all", action="store_true")
+    i.add_argument("paths", nargs="*")
+    i.set_defaults(fn=cmd_index)
+
+    sub.add_parser("watch", help="Indexação contínua via inotify (serviço)").set_defaults(fn=cmd_watch)
+
+    st = sub.add_parser("status", help="Exibe telemetria de VRAM, modelos e daemons")
+    st.add_argument("--waybar", action="store_true", help="Saída JSON formatada para a Waybar")
+    st.set_defaults(fn=cmd_status)
+
+    e = sub.add_parser("evict", help="Descarrega todos os modelos da VRAM imediatamente")
+    e.add_argument("-q", "--quiet", action="store_true", help="Não envia notificação desktop")
+    e.add_argument("--reason", default="Pedido manual")
+    e.set_defaults(fn=cmd_evict)
+
+    m = sub.add_parser("model", help="Lista ou troca o modelo padrão do Dragon OS")
+    m.add_argument("name", nargs="?", help="Nome do modelo no Ollama (ex: qwen2.5-coder:7b)")
+    m.add_argument("-w", "--warmup", action="store_true", help="Já carrega o modelo na VRAM")
+    m.add_argument("--reset", action="store_true", help="Volta ao modelo definido pelo Tier")
+    m.set_defaults(fn=cmd_model)
+
+    w = sub.add_parser("warmup", help="Pré-carrega o modelo padrão na memória")
+    w.add_argument("--model")
+    w.set_defaults(fn=cmd_warmup)
+
+    sub.add_parser("sanctuary", help="Alterna o Modo Santuário (Foco Profundo)").set_defaults(fn=cmd_sanctuary)
+
+    a = p.parse_args(argv)
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

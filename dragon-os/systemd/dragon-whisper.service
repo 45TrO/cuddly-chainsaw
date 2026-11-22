@@ -1,0 +1,17 @@
+[Unit]
+Description=Dragon OS Whispering Wind - Servidor Local whisper.cpp
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/dragon-whisper
+ExecStart=%h/.local/share/dragon-whisper/build/bin/whisper-server \
+    -m models/active-model.bin \
+    -l pt \
+    -t 4 \
+    --host 127.0.0.1 \
+    --port 8178
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

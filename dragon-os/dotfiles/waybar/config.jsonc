@@ -1,0 +1,91 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 34,
+    "margin-top": 6,
+    "margin-left": 10,
+    "margin-right": 10,
+    "spacing": 8,
+
+    "modules-left": [
+        "custom/dragon-logo",
+        "hyprland/workspaces",
+        "custom/whisper"
+    ],
+    "modules-center": [
+        "hyprland/window"
+    ],
+    "modules-right": [
+        "custom/dragond",
+        "custom/scales",
+        "cpu",
+        "memory",
+        "pulseaudio",
+        "clock"
+    ],
+
+    "custom/dragon-logo": {
+        "format": " 龙 ",
+        "on-click": "~/.config/dragon-breath/dragonctl breath",
+        "tooltip-format": "Dragon Breath (Super + Shift + Space)"
+    },
+
+    "hyprland/workspaces": {
+        "format": "{icon}",
+        "on-click": "activate",
+        "format-icons": {
+            "1": "一",
+            "2": "二",
+            "3": "三",
+            "4": "四",
+            "5": "五",
+            "urgent": "!",
+            "default": "·"
+        }
+    },
+
+    "custom/whisper": {
+        "exec": "if [ -f /tmp/whispering_wind.pid ]; then echo '{\"text\": \"🎙️ Ouvindo...\", \"class\": \"recording\"}'; else echo '{\"text\": \"\", \"class\": \"idle\"}'; fi",
+        "return-type": "json",
+        "interval": 1,
+        "on-click": "~/.config/dragon-breath/whispering_wind.sh"
+    },
+
+    "custom/dragond": {
+        "exec": "~/.config/dragon-breath/dragonctl status --waybar",
+        "return-type": "json",
+        "interval": 3,
+        "on-click": "~/.config/dragon-breath/dragonctl breath",
+        "on-click-right": "~/.config/dragon-breath/dragonctl evict --reason 'Clique na Waybar'"
+    },
+
+    "custom/scales": {
+        "exec": "cat \"$XDG_RUNTIME_DIR/dragon_scales.json\" 2>/dev/null || echo '{\"text\": \"鱗 off\", \"class\": \"off\", \"tooltip\": \"dragon-scales-watch parado\"}'",
+        "return-type": "json",
+        "interval": 3,
+        "on-click": "notify-send '🐉 Dragon Scales' 'Varredura completa iniciada...' && nice -n 19 ionice -c3 ~/.config/dragon-breath/dragonctl index --all"
+    },
+
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 2
+    },
+
+    "memory": {
+        "format": " {percentage}%",
+        "interval": 2
+    },
+
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": " Mudo",
+        "format-icons": {
+            "default": ["", "", ""]
+        }
+    },
+
+    "clock": {
+        "format": " {:%H:%M   %d/%m}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    }
+}

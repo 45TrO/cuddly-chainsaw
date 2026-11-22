@@ -1,0 +1,106 @@
+/* ============================================================================
+ * 🐉 DRAGON OS - WAYBAR THEME (Ink & Jade)
+ * ============================================================================ */
+
+* {
+    font-family: "JetBrainsMono Nerd Font", "Noto Sans CJK SC", monospace;
+    font-size: 12.5px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: rgba(13, 15, 18, 0.88); /* #0D0F12 Nanquim translúcido */
+    border: 1.5px solid rgba(0, 168, 107, 0.5); /* Borda Jade suave */
+    color: #E5E9F0;
+}
+
+/* Logo do Dragão (龍) */
+#custom-dragon-logo {
+    background-color: #00A86B;
+    color: #0D0F12;
+    font-weight: 900;
+    font-size: 14px;
+    padding: 0 10px;
+    margin: 4px 0 4px 4px;
+}
+
+/* Workspaces em Ideogramas */
+#workspaces {
+    background-color: #161A20;
+    margin: 4px 2px;
+    padding: 0 4px;
+}
+
+#workspaces button {
+    padding: 0 8px;
+    color: #7A8490;
+    background: transparent;
+}
+
+#workspaces button.active {
+    color: #D4AF37; /* Dourado Celestial */
+    border-bottom: 2px solid #00A86B;
+}
+
+#workspaces button.urgent {
+    color: #E34234; /* Vermelho Cinábrio */
+}
+
+/* Módulo Whispering Wind (Ditado Ativo) */
+#custom-whisper.recording {
+    background-color: #E34234; /* Alerta Cinábrio quando o mic está aberto */
+    color: #FFFFFF;
+    padding: 0 12px;
+    margin: 4px 2px;
+}
+
+/* Módulo dragond (Status da IA e VRAM) */
+#custom-dragond {
+    background-color: #161A20;
+    padding: 0 12px;
+    margin: 4px 2px;
+    border: 1px solid #00A86B;
+    color: #00A86B;
+}
+
+#custom-dragond.offline {
+    border-color: #E34234;
+    color: #E34234;
+}
+
+#custom-dragond.active {
+    border-color: #D4AF37;
+    color: #D4AF37; /* Fica dourado quando há um modelo carregado na VRAM */
+}
+
+/* Módulo Scales (Indexador RAG) */
+#custom-scales {
+    background-color: #161A20;
+    color: #E5E9F0;
+    padding: 0 10px;
+    margin: 4px 2px;
+}
+
+#custom-scales.offline, #custom-scales.off {
+    color: #E34234;
+}
+
+#custom-scales.indexing {
+    color: #D4AF37;
+    border: 1px solid #D4AF37;
+}
+
+/* Módulos de Sistema */
+#cpu, #memory, #pulseaudio, #clock {
+    background-color: #161A20;
+    padding: 0 10px;
+    margin: 4px 2px;
+}
+
+#clock {
+    color: #D4AF37;
+    margin-right: 4px;
+}
