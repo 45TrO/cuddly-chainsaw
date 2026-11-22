@@ -1,0 +1,91 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 34,
+    "margin-top": 6,
+    "margin-left": 10,
+    "margin-right": 10,
+    "spacing": 8,
+
+    "modules-left": [
+        "custom/dragon-logo",
+        "hyprland/workspaces",
+        "custom/whisper"
+    ],
+    "modules-center": [
+        "hyprland/window"
+    ],
+    "modules-right": [
+        "custom/dragond",
+        "custom/scales",
+        "cpu",
+        "memory",
+        "pulseaudio",
+        "clock"
+    ],
+
+    "custom/dragon-logo": {
+        "format": " 龙 ",
+        "on-click": "~/.config/dragon-breath/breath.py",
+        "tooltip-format": "Dragon Breath (Super + Shift + Space)"
+    },
+
+    "hyprland/workspaces": {
+        "format": "{icon}",
+        "on-click": "activate",
+        "format-icons": {
+            "1": "一",
+            "2": "二",
+            "3": "三",
+            "4": "四",
+            "5": "五",
+            "urgent": "!",
+            "default": "·"
+        }
+    },
+
+    "custom/whisper": {
+        "exec": "if [ -f /tmp/whispering_wind.pid ]; then echo '{\"text\": \"🎙️ Ouvindo...\", \"class\": \"recording\"}'; else echo '{\"text\": \"\", \"class\": \"idle\"}'; fi",
+        "return-type": "json",
+        "interval": 1,
+        "on-click": "~/.config/dragon-breath/whispering_wind.sh"
+    },
+
+    "custom/dragond": {
+        "exec": "jq -c 'if (.loaded_models | length) > 0 then {text: (.icon + \" \" + .loaded_models[0] + \" (\" + (.vram_pct|tostring) + \"%)\"), tooltip: (\"Tier: \" + .tier + \"\\nGPU: \" + .gpu_type + \"\\nVRAM: \" + (.vram_used_mb|tostring) + \"/\" + (.vram_total_mb|tostring) + \" MB\\nClique direito para limpar VRAM\"), class: \"active\"} else {text: (.icon + \" \" + .tier + \" · Idle (\" + (.vram_pct|tostring) + \"%)\"), tooltip: (\"Tier: \" + .tier + \"\\nNenhum modelo na VRAM\"), class: \"idle\"} end' /tmp/dragon_state.json 2>/dev/null || echo '{\"text\":\"🐉 dragond off\"}'",
+        "return-type": "json",
+        "interval": 3,
+        "on-click": "~/.config/dragon-breath/breath.py",
+        "on-click-right": "curl -s http://127.0.0.1:11434/api/ps | jq -r '.models[].name' | xargs -I {} curl -s http://127.0.0.1:11434/api/generate -d '{\"model\":\"{}\",\"keep_alive\":0}' >/dev/null && notify-send '🐉 dragond' 'VRAM liberada manualmente.'"
+    },
+
+    "custom/scales": {
+        "exec": "if [ \"$(systemctl --user is-active dragon-scales.service)\" = activating ]; then echo '{\"text\": \"⚡ Indexando\", \"class\": \"indexing\"}'; else echo '{\"text\": \"鱗 Scales\", \"class\": \"ready\"}'; fi",
+        "return-type": "json",
+        "interval": 5,
+        "on-click": "systemctl --user --no-block start dragon-scales.service && notify-send '🐉 Dragon Scales' 'Indexação manual iniciada...'"
+    },
+
+    "cpu": {
+        "format": " {usage}%",
+        "interval": 2
+    },
+
+    "memory": {
+        "format": " {percentage}%",
+        "interval": 2
+    },
+
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": " Mudo",
+        "format-icons": {
+            "default": ["", "", ""]
+        }
+    },
+
+    "clock": {
+        "format": " {:%H:%M   %d/%m}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    }
+}

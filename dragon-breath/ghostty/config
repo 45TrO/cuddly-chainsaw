@@ -1,0 +1,21 @@
+font-family = "JetBrainsMono Nerd Font"
+font-size = 11.5
+background = 0D0F12
+foreground = E5E9F0
+background-opacity = 0.92
+window-padding-x = 12
+window-padding-y = 10
+confirm-close-surface = false
+cursor-color = D4AF37
+selection-background = 00A86B
+selection-foreground = 0D0F12
+
+# Paleta ANSI Ink & Jade
+palette = 0=#0D0F12
+palette = 1=#E34234
+palette = 2=#00A86B
+palette = 3=#D4AF37
+palette = 4=#3B82F6
+palette = 5=#A855F7
+palette = 6=#10B981
+palette = 7=#E5E9F0
