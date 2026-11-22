@@ -36,3 +36,15 @@ cp ~/<repo>/dragon-breath/systemd/dragon-whisper.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dragon-whisper.service
 ```
+
+## dragond + Dragon Shell
+
+```bash
+cp systemd/dragond.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dragond.service
+
+chmod +x ~/.config/dragon-breath/dragond.py
+echo 'source ~/.config/dragon-breath/dragon-shell.zsh' >> ~/.zshrc
+# ferramentas: sudo pacman -S eza bat ripgrep fd bottom zoxide jq
+```
