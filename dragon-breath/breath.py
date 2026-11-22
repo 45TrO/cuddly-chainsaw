@@ -5,6 +5,8 @@ import subprocess
 import urllib.request
 import os
 
+from scales_search import search_scales
+
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 MODEL = os.environ.get("DRAGON_MODEL", "qwen2.5-coder:3b")
 ROFI_THEME = os.path.expanduser("~/.config/dragon-breath/config.rasi")
@@ -66,9 +68,32 @@ def query_ollama(user_query, include_clip=False):
 
 def main():
     # 1. Captura a pergunta inicial
-    query = rofi_prompt("🐉 Dragon Breath", "Digite sua consulta (prefixe com '@' para incluir o texto copiado)")
+    query = rofi_prompt("🐉 Dragon Breath", "Digite sua consulta ('@' inclui o texto copiado, '#' busca nos seus arquivos)")
     if not query:
         sys.exit(0)
+
+    sources = []
+    if query.startswith("#"):
+        clean_query = query[1:].strip()
+        try:
+            sources = search_scales(clean_query, top_k=4)
+        except Exception as e:
+            # Ollama fora do ar / timeout: segue sem contexto em vez de derrubar o script
+            sources = []
+            query = f"(Aviso: falha ao consultar o índice Scales: {e}) {clean_query}"
+        else:
+            if sources:
+                context_blocks = "\n\n---\n".join(
+                    f"[{s['file']}] (Relevância: {s['score']:.2f}):\n{s['content']}"
+                    for s in sources
+                )
+                query = (
+                    f"Use os seguintes trechos dos arquivos locais do usuário para responder.\n"
+                    f"Cite o nome do arquivo entre colchetes.\n\n"
+                    f"{context_blocks}\n\nPergunta: {clean_query}"
+                )
+            else:
+                query = f"(Aviso: Nenhum arquivo relevante encontrado no índice Scales) {clean_query}"
 
     include_clip = False
     if query.startswith("@"):
