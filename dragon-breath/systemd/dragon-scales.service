@@ -1,0 +1,8 @@
+[Unit]
+Description=Dragon OS Scales - Indexador Vetorial Local
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 %h/.config/dragon-breath/scales_indexer.py
