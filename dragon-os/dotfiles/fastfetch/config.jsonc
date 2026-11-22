@@ -14,7 +14,7 @@
         "title",
         "separator",
         { "type": "command", "key": "Sistema", "text": "echo \"Dragon OS $(cat ~/.config/dragon-breath/VERSION 2>/dev/null || echo 1.5) · Ink & Jade\"" },
-        { "type": "command", "key": "Tier", "text": "jq -r '.icon + \" \" + .tier' /tmp/dragon_state.json 2>/dev/null || echo 'dragond parado'" },
+        { "type": "command", "key": "Tier", "text": "jq -r '.icon + \" \" + .tier' \"$XDG_RUNTIME_DIR/dragon_state.json\" 2>/dev/null || echo 'dragond parado'" },
         { "type": "kernel", "key": "Kernel" },
         { "type": "uptime", "key": "Uptime" },
         { "type": "packages", "key": "Pacotes" },

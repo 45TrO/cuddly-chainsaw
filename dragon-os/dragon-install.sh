@@ -17,6 +17,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAGON_DIR="$HOME/.config/dragon-breath"
 SCALES_DIR="$HOME/.local/share/dragon-scales"
 WHISPER_DIR="$HOME/.local/share/dragon-whisper"
+# whisper.cpp fixado numa versão: compilar o HEAD do GitHub executaria qualquer código novo
+WHISPER_REPO="https://github.com/ggml-org/whisper.cpp.git"
+WHISPER_TAG="v1.9.5"
+WHISPER_COMMIT="d1be6fde11ac6e0407606b4e42fe72d34add8037"  # commit da tag v1.9.5 (tag anotada)
 BACKUP_DIR="$HOME/.config/dragon-backup-$(date +%Y%m%d_%H%M%S)"
 DRAGON_VERSION="$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo 1.5)"
 
@@ -132,7 +136,15 @@ echo -e "\n${GOLD}==> [3/7] Forjando módulo Whispering Wind (whisper.cpp)...${R
 
 mkdir -p "$WHISPER_DIR"
 if [[ ! -d "$WHISPER_DIR/.git" ]]; then
-    git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+    git clone --depth 1 --branch "$WHISPER_TAG" "$WHISPER_REPO" "$WHISPER_DIR"
+else
+    git -C "$WHISPER_DIR" fetch --depth 1 origin "refs/tags/$WHISPER_TAG:refs/tags/$WHISPER_TAG"
+    git -C "$WHISPER_DIR" checkout -q "$WHISPER_TAG"
+fi
+# A tag precisa apontar para o commit conhecido (tag movida = código diferente do auditado)
+if [[ "$(git -C "$WHISPER_DIR" rev-parse HEAD)" != "$WHISPER_COMMIT" ]]; then
+    echo -e "${CINNABAR}whisper.cpp $WHISPER_TAG não corresponde ao commit esperado ($WHISPER_COMMIT). Abortando.${RESET}"
+    exit 1
 fi
 
 [[ "$GPU_VENDOR" == "NVIDIA" ]] && export PATH="/opt/cuda/bin:$PATH"

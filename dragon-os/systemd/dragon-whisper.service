@@ -13,5 +13,14 @@ ExecStart=%h/.local/share/dragon-whisper/build/bin/whisper-server \
     --port 8178
 Restart=on-failure
 
+# Isolamento: servidor HTTP local que decodifica áudio enviado por qualquer processo local
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+
 [Install]
 WantedBy=default.target

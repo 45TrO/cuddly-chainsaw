@@ -5,16 +5,20 @@
 # ============================================================================
 set -e
 
-WORK_DIR="/tmp/dragon-archiso-work"
 OUT_DIR="$PWD/out-iso"
-PROFILE_DIR="/tmp/dragon-profile"
+# Diretórios temporários exclusivos (mktemp): caminhos fixos em /tmp permitiriam que outro
+# usuário local preparasse o perfil antes, e o mkarchiso (root) executaria o profiledef.sh dele
+BUILD_ROOT="$(mktemp -d -t dragon-iso.XXXXXXXX)"
+WORK_DIR="$BUILD_ROOT/work"
+PROFILE_DIR="$BUILD_ROOT/profile"
+# O work dir do mkarchiso pertence ao root: a limpeza também precisa de sudo
+trap 'sudo rm -rf -- "$BUILD_ROOT"' EXIT
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> Instalando archiso..."
 sudo pacman -S --needed --noconfirm archiso ffmpeg
 
 echo "==> Preparando perfil base releng do Arch Linux..."
-sudo rm -rf "$PROFILE_DIR" "$WORK_DIR"
 cp -r /usr/share/archiso/configs/releng "$PROFILE_DIR"
 
 # 1. Adiciona os pacotes do Dragon OS na lista da ISO
@@ -59,8 +63,8 @@ mpv
 EOF
 
 # Assets da abertura gerados uma vez (papel de parede e clarão final; o Plymouth não roda na ISO live)
-ASSETS_TMP="$(mktemp -d)"
-trap 'rm -rf "$ASSETS_TMP"' EXIT
+ASSETS_TMP="$BUILD_ROOT/assets"
+mkdir -p "$ASSETS_TMP"
 "$REPO_DIR/boot/make-boot-assets.sh" "$REPO_DIR/assets/boot-intro.mp4" "$ASSETS_TMP"
 
 # 2. Injeta os arquivos do Dragon OS na ISO.

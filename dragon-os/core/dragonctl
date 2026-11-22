@@ -44,8 +44,9 @@ CONF_DIR = os.path.join(HOME, ".config", "dragon-breath")
 ENV_FILE = os.path.join(CONF_DIR, "dragon_env.sh")
 PROMPTS_FILE = os.path.join(CONF_DIR, "prompts.json")
 ROFI_THEME = os.path.join(CONF_DIR, "config.rasi")
-STATE_FILE = "/tmp/dragon_state.json"  # escrito pelo dragond
-RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+# $XDG_RUNTIME_DIR (/run/user/UID) é 0700 e só do usuário; o /tmp é compartilhado por todos
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(HOME, ".cache", "dragon-runtime")
+STATE_FILE = os.path.join(RUNTIME_DIR, "dragon_state.json")  # escrito pelo dragond
 SCALES_STATUS = os.path.join(RUNTIME_DIR, "dragon_scales.json")  # lido pela Waybar
 DB_PATH = os.path.join(HOME, ".local", "share", "dragon-scales", "scales.db")
 
@@ -59,7 +60,11 @@ RETRY_S = 30.0     # nova tentativa quando o Ollama está fora do ar
 SCORE_THRESHOLD = 0.32  # similaridade mínima de um trecho do Scales
 
 WHISPER_URL = "http://127.0.0.1:8178"
-SANCTUARY_LOCK = "/tmp/dragon_sanctuary.lock"
+SANCTUARY_LOCK = os.path.join(RUNTIME_DIR, "dragon_sanctuary.lock")
+# Nomes de modelo do Ollama: sem aspas, espaços ou metacaracteres de shell
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+# Arquivos com cara de segredo nunca entram no índice (o conteúdo iria para o SQLite e para o modelo)
+SENSITIVE_NAME_RE = re.compile(r"(?i)(secret|credential|passw|token|api[_-]?key|private|\.env|id_rsa|id_ed25519|\.pem$|\.key$)")
 # Modelo escolhido com 'dragonctl model'; o dragond o respeita no lugar do modelo do Tier
 MODEL_OVERRIDE = os.path.join(CONF_DIR, "model.override")
 
@@ -116,9 +121,9 @@ def _read_env_file():
     try:
         with open(ENV_FILE) as f:
             for line in f:
-                m = re.match(r'\s*export\s+(\w+)="(.*)"\s*$', line)
+                m = re.match(r"""\s*export\s+(\w+)=(?:"(.*)"|'(.*)'|(\S*))\s*$""", line)
                 if m:
-                    values[m.group(1)] = m.group(2)
+                    values[m.group(1)] = next(g for g in m.groups()[1:] if g is not None)
     except OSError:
         pass
     return values
@@ -127,9 +132,10 @@ def _read_env_file():
 def read_model_override():
     try:
         with open(MODEL_OVERRIDE) as f:
-            return f.read().strip() or None
+            name = f.read().strip()
     except OSError:
         return None
+    return name if MODEL_NAME_RE.match(name) else None
 
 
 def default_model():
@@ -322,13 +328,25 @@ def terminal():
     return os.environ.get("DRAGON_TERMINAL", "ghostty")
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def safe_text(text):
+    """Remove caracteres de controle (ESC, BEL, C1...) mantendo \\n e \\t.
+
+    Saída do modelo e trechos de documentos são dados não confiáveis: uma sequência
+    OSC 52 (ESC ] 52), por exemplo, faria o terminal sobrescrever o clipboard.
+    """
+    return _CONTROL_RE.sub("", text)
+
+
 def one_line(text):
     """Primeira linha útil de uma resposta, sem cercas markdown nem crases."""
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("```"):
             continue
-        return line.replace("`", "").strip()
+        return safe_text(line.replace("`", "")).strip()
     return ""
 
 
@@ -337,8 +355,15 @@ def one_line(text):
 # ============================================================================
 
 def db_connect():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, mode=0o700, exist_ok=True)
+    os.chmod(db_dir, 0o700)  # o índice guarda trechos de todos os documentos
+    old_umask = os.umask(0o077)
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+    finally:
+        os.umask(old_umask)
+    os.chmod(DB_PATH, 0o600)
     conn.execute("PRAGMA foreign_keys = ON")    # sem isso o ON DELETE CASCADE é ignorado
     conn.execute("PRAGMA journal_mode = WAL")   # buscas não bloqueiam durante a indexação
     conn.executescript("""
@@ -359,12 +384,17 @@ def db_connect():
     return conn
 
 
+def ensure_runtime_dir():
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+
+
 def set_scales_status(state, detail=""):
     """Estado para a Waybar (gravação atômica em $XDG_RUNTIME_DIR)."""
     labels = {"indexing": "⚡ Indexando", "ready": "鱗 Scales", "offline": "鱗 Ollama off"}
     data = {"text": labels.get(state, state), "class": state, "tooltip": detail or labels.get(state, state)}
     tmp = SCALES_STATUS + ".tmp"
     try:
+        ensure_runtime_dir()
         with open(tmp, "w") as f:
             json.dump(data, f)
         os.replace(tmp, SCALES_STATUS)
@@ -375,7 +405,14 @@ def set_scales_status(state, detail=""):
 def is_indexable(path):
     if os.path.splitext(path)[1].lower() not in INDEX_EXTS:
         return False
+    if SENSITIVE_NAME_RE.search(os.path.basename(path)):
+        return False
     return not any(part in IGNORE_DIRS for part in path.split(os.sep))
+
+
+def is_safe_file(path):
+    """Arquivo regular de verdade: symlinks são ignorados (poderiam puxar ~/.ssh para o índice)."""
+    return not os.path.islink(path) and os.path.isfile(path)
 
 
 def iter_files(base):
@@ -383,7 +420,7 @@ def iter_files(base):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for name in files:
             path = os.path.join(root, name)
-            if is_indexable(path):
+            if is_indexable(path) and is_safe_file(path):
                 yield path
 
 
@@ -413,6 +450,8 @@ def chunk_text(text, size=800, overlap=150):
 def index_file(conn, ol, path, mtime=None):
     """Indexa um arquivo de forma atômica: ou entra tudo, ou nada muda."""
     import numpy as np
+    if not is_safe_file(path):
+        raise ValueError("não é um arquivo regular (symlink ignorado)")
     if mtime is None:
         mtime = os.path.getmtime(path)
     chunks = chunk_text(extract_text(path))
@@ -553,8 +592,7 @@ def cmd_gen(a):
     except OllamaError as e:
         print(str(e), file=sys.stderr)
         return 1
-    if a.one_line:
-        out = one_line(out)
+    out = one_line(out) if a.one_line else safe_text(out)
     print(out)
     return 0 if out else 1
 
@@ -571,7 +609,7 @@ def cmd_ask(a):
     sys.stdout.flush()
     try:
         for part in Ollama().stream("/api/generate", body):
-            sys.stdout.write(part.get("response", ""))
+            sys.stdout.write(safe_text(part.get("response", "")))
             sys.stdout.flush()
     except OllamaError as e:
         print(f"\n{e}", file=sys.stderr)
@@ -617,12 +655,12 @@ def cmd_breath(a):
         except OllamaError as e:
             answer = f"Erro ao conectar ao Ollama: {e}"
         answer = answer or "Sem resposta do modelo."
-        first_line = answer.split("\n")[0].strip("` ")
+        first_line = safe_text(answer.split("\n")[0].strip("` "))
 
         actions = [
             "📋 Copiar resposta completa",
             f"⚡ Copiar 1ª linha ({first_line[:40]}...)",
-            f"🖥️ Executar no terminal: {first_line[:40]}...",
+            f"🖥️ Abrir no terminal para revisar: {first_line[:40]}...",
             "🔄 Nova pergunta",
         ]
         if sources:
@@ -636,8 +674,11 @@ def cmd_breath(a):
         elif choice.startswith("⚡"):
             copy_text(first_line)
         elif choice.startswith("🖥️"):
-            # Abre o terminal executando o comando e mantendo a sessão aberta
-            subprocess.Popen([terminal(), "-e", "sh", "-c", f"{first_line}; exec zsh"])
+            # A resposta do modelo pode ter sido manipulada (prompt injection via '#' ou '@'):
+            # o comando NÃO é executado. O dragon-shell.zsh o deixa digitado no prompt
+            # (DRAGON_PREFILL) e só roda se o usuário revisar e apertar Enter.
+            env = dict(os.environ, DRAGON_PREFILL=safe_text(first_line))
+            subprocess.Popen([terminal(), "-e", "zsh", "-i"], env=env)
         elif choice.startswith("🔄"):
             continue
         return 0
@@ -694,6 +735,7 @@ def _eye_vision(ol, path, prompt):
 def cmd_eye(a):
     ol = Ollama()
     # Captura vai para $XDG_RUNTIME_DIR (0700, só do usuário), não para o /tmp compartilhado
+    ensure_runtime_dir()
     fd, shot = tempfile.mkstemp(prefix="dragon_eye_", suffix=".png", dir=RUNTIME_DIR)
     os.close(fd)
     try:
@@ -769,9 +811,9 @@ def cmd_search(a):
         print(f"  {MIST}Nenhum trecho relevante encontrado (score >= {SCORE_THRESHOLD}).{RESET}\n")
         return 0
     for i, r in enumerate(results, 1):
-        snippet = r["content"].replace("\n", " ")[:180]
-        print(f"  {BOLD}{i}. [{JADE}{r['file']}{RESET}{BOLD}]{RESET} {GOLD}(Similaridade: {r['score']:.3f}){RESET}")
-        print(f"     {MIST}Caminho:{RESET} {r['path']}")
+        snippet = safe_text(r["content"].replace("\n", " "))[:180]
+        print(f"  {BOLD}{i}. [{JADE}{safe_text(r['file'])}{RESET}{BOLD}]{RESET} {GOLD}(Similaridade: {r['score']:.3f}){RESET}")
+        print(f"     {MIST}Caminho:{RESET} {safe_text(r['path'])}")
         print(f"     \"{snippet}...\"\n")
     return 0
 
@@ -891,6 +933,8 @@ def cmd_watch(a):
                 try:
                     if not os.path.exists(path):
                         remove_paths(conn, [path])
+                        continue
+                    if not is_safe_file(path):
                         continue
                     todo, mtime = needs_index(conn, path)
                     if todo:
@@ -1062,6 +1106,9 @@ def _with_tag(name):
 
 
 def cmd_model(a):
+    if a.name and not MODEL_NAME_RE.match(a.name):
+        print(f"{CINNABAR}Nome de modelo inválido: {a.name!r}{RESET}")
+        return 1
     ol = Ollama()
     try:
         installed = ol.installed_models()

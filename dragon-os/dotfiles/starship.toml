@@ -38,6 +38,6 @@ min_time = 1_500
 format = " [⏱ $duration](mist)"
 
 [custom.dragon_tier]
-command = "jq -r '.icon + \" \" + .tier' /tmp/dragon_state.json 2>/dev/null || echo '🐉 Lóng'"
+command = "jq -r '.icon + \" \" + .tier' \"$XDG_RUNTIME_DIR/dragon_state.json\" 2>/dev/null || echo '🐉 Lóng'"
 when = "true"
 format = "[($output) ](bold jade)"

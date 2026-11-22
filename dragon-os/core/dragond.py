@@ -4,6 +4,8 @@ dragond - Daemon de Gerenciamento de Hardware e VRAM do Dragon OS (龙)
 Detecta o Tier da máquina e libera VRAM automaticamente sob alta carga.
 """
 import os
+import re
+import shlex
 import time
 import json
 import shutil
@@ -11,7 +13,11 @@ import subprocess
 import urllib.request
 
 OLLAMA_BASE = "http://127.0.0.1:11434"
-STATE_FILE = "/tmp/dragon_state.json"
+# $XDG_RUNTIME_DIR (/run/user/UID, 0700): no /tmp compartilhado outro usuário poderia criar
+# ou trocar o arquivo antes e controlar o que Waybar, Starship e dragonctl leem
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache/dragon-runtime")
+STATE_FILE = os.path.join(RUNTIME_DIR, "dragon_state.json")
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 ENV_FILE = os.path.expanduser("~/.config/dragon-breath/dragon_env.sh")
 MODEL_OVERRIDE = os.path.expanduser("~/.config/dragon-breath/model.override")
 
@@ -121,21 +127,32 @@ def has_heavy_process():
     except Exception:
         return None
 
+def _atomic_write(path, data):
+    """Grava em arquivo temporário e troca de uma vez: leitores nunca veem JSON pela metade."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
 def read_model_override():
     """Modelo escolhido com 'dragonctl model' (tem prioridade sobre o modelo do Tier)."""
     try:
         with open(MODEL_OVERRIDE) as f:
-            return f.read().strip() or None
+            name = f.read().strip()
     except OSError:
         return None
+    # O valor vai para o dragon_env.sh (lido com 'source' pelo Zsh): só nomes de modelo válidos
+    return name if MODEL_NAME_RE.match(name) else None
 
 def write_env_and_state(profile, vram_total, vram_used, gpu_type, loaded_models):
     model = read_model_override() or profile["model"]
     os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
-    with open(ENV_FILE, "w") as f:
-        f.write(f'export DRAGON_TIER="{profile["tier"]}"\n')
-        f.write(f'export DRAGON_MODEL="{model}"\n')
-        f.write(f'export DRAGON_VISION_MODEL="{profile["vision_model"]}"\n')
+    env = (
+        f'export DRAGON_TIER={shlex.quote(profile["tier"])}\n'
+        f'export DRAGON_MODEL={shlex.quote(model)}\n'
+        f'export DRAGON_VISION_MODEL={shlex.quote(profile["vision_model"])}\n'
+    )
+    _atomic_write(ENV_FILE, env)
 
     state = {
         "tier": profile["tier"],
@@ -149,8 +166,8 @@ def write_env_and_state(profile, vram_total, vram_used, gpu_type, loaded_models)
         "vram_pct": round((vram_used / max(vram_total, 1)) * 100, 1),
         "loaded_models": loaded_models
     }
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+    _atomic_write(STATE_FILE, json.dumps(state))
 
 def main():
     vram_total, vram_used, gpu_type = get_vram_info()

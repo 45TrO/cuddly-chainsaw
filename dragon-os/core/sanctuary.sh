@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Sanctuary Mode (Modo Santuário) - Zero distrações e foco total no Hyprland
 
-STATE_FLAG="/tmp/dragon_sanctuary.lock"
+RUNTIME="${XDG_RUNTIME_DIR:-$HOME/.cache/dragon-runtime}"
+# shellcheck disable=SC2174  # só a pasta final precisa ser 0700
+mkdir -p -m 700 "$RUNTIME"
+STATE_FLAG="$RUNTIME/dragon_sanctuary.lock"
 
 if [[ -f "$STATE_FLAG" ]]; then
     rm -f "$STATE_FLAG"

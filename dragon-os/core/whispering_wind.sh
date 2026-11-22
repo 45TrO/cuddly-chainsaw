@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Dragon OS - Módulo Whispering Wind (风语)
 
-PID_FILE="/tmp/whispering_wind.pid"
-AUDIO_FILE="/tmp/whispering_wind.wav"
+# Áudio e PID só do usuário: em /tmp outros usuários poderiam ler o ditado ou forjar o PID
+RUNTIME="${XDG_RUNTIME_DIR:-$HOME/.cache/dragon-runtime}"
+# shellcheck disable=SC2174  # só a pasta final precisa ser 0700
+mkdir -p -m 700 "$RUNTIME"
+umask 077
+PID_FILE="$RUNTIME/whispering_wind.pid"
+AUDIO_FILE="$RUNTIME/whispering_wind.wav"
 SERVER_URL="http://127.0.0.1:8178/inference"
 CLI_BIN="$HOME/.local/share/dragon-whisper/build/bin/whisper-cli"
 MODEL_PATH="$HOME/.local/share/dragon-whisper/models/active-model.bin"
@@ -12,9 +17,13 @@ if [ -f "$PID_FILE" ]; then
     REC_PID=$(cat "$PID_FILE")
     rm -f "$PID_FILE"
 
-    # Interrompe o pw-record com SIGINT para fechar o cabeçalho WAV corretamente
-    kill -SIGINT "$REC_PID" 2>/dev/null
-    wait "$REC_PID" 2>/dev/null
+    # Só sinaliza se o PID for mesmo o pw-record (arquivo velho ou forjado não mata outro processo)
+    if [[ "$REC_PID" =~ ^[0-9]+$ ]] && [[ "$(ps -o comm= -p "$REC_PID" 2>/dev/null)" == pw-record ]]; then
+        # Interrompe o pw-record com SIGINT para fechar o cabeçalho WAV corretamente
+        kill -SIGINT "$REC_PID" 2>/dev/null
+        # 'wait' não funciona entre execuções diferentes do script: espera o processo sair
+        for _ in $(seq 1 40); do kill -0 "$REC_PID" 2>/dev/null || break; sleep 0.05; done
+    fi
 
     notify-send -t 1200 -u low -h string:x-canonical-private-synchronous:whisper \
         "🐉 Whispering Wind" "Transcrevendo..."
@@ -30,15 +39,20 @@ if [ -f "$PID_FILE" ]; then
     fi
 
     # Limpa espaços extras, quebras de linha e alucinações de silêncio do Whisper
-    CLEAN_TEXT=$(echo "$RAW_TEXT" | tr '\n' ' ' | sed -E 's/\[.*\]//g; s/\(.*\)//g; s/^[[:space:]]+//; s/[[:space:]]+$//')
+    # Remove também caracteres de controle: o texto vira teclas digitadas na janela em foco
+    CLEAN_TEXT=$(printf '%s' "$RAW_TEXT" | tr '\n' ' ' | tr -d '\000-\010\013-\037\177' \
+        | sed -E 's/\[[^]]*\]//g; s/\([^)]*\)//g; s/^[[:space:]]+//; s/[[:space:]]+$//')
 
     if [ -n "$CLEAN_TEXT" ]; then
         # Copia para o clipboard como segurança e digita na janela ativa via Wayland
-        wl-copy "$CLEAN_TEXT"
+        printf '%s' "$CLEAN_TEXT" | wl-copy
         sleep 0.08 # Pequena pausa para garantir que a janela mantenha o foco
-        wtype "$CLEAN_TEXT"
+        # '--': texto que comece com '-' (ex.: "-k Return") não vira opção do wtype
+        wtype -- "$CLEAN_TEXT"
+        # Escapa o markup do Dunst no corpo da notificação
+        SAFE_BODY=$(printf '%s' "$CLEAN_TEXT" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
         notify-send -t 2000 -u low -h string:x-canonical-private-synchronous:whisper \
-            "🐉 Sussurro Enviado" "$CLEAN_TEXT"
+            "🐉 Sussurro Enviado" "$SAFE_BODY"
     else
         notify-send -t 1500 -u low -h string:x-canonical-private-synchronous:whisper \
             "🐉 Whispering Wind" "Nenhuma fala detectada."

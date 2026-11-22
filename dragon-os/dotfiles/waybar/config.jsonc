@@ -45,7 +45,7 @@
     },
 
     "custom/whisper": {
-        "exec": "if [ -f /tmp/whispering_wind.pid ]; then echo '{\"text\": \"🎙️ Ouvindo...\", \"class\": \"recording\"}'; else echo '{\"text\": \"\", \"class\": \"idle\"}'; fi",
+        "exec": "if [ -f \"$XDG_RUNTIME_DIR/whispering_wind.pid\" ]; then echo '{\"text\": \"🎙️ Ouvindo...\", \"class\": \"recording\"}'; else echo '{\"text\": \"\", \"class\": \"idle\"}'; fi",
         "return-type": "json",
         "interval": 1,
         "on-click": "~/.config/dragon-breath/whispering_wind.sh"

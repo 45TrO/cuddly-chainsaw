@@ -8,5 +8,17 @@ ExecStart=/usr/bin/python3 %h/.config/dragon-breath/dragond.py
 Restart=always
 RestartSec=3
 
+# Isolamento: só escreve o dragon_env.sh e o estado em $XDG_RUNTIME_DIR.
+# Sem PrivateDevices: o nvidia-smi precisa de /dev/nvidia*.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/dragon-breath %t
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=0077
+
 [Install]
 WantedBy=default.target

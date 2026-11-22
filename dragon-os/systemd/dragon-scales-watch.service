@@ -11,5 +11,20 @@ ExecStart=/usr/bin/python3 %h/.config/dragon-breath/dragonctl watch
 Restart=on-failure
 RestartSec=10
 
+# Isolamento: o serviço abre PDFs e textos baixados da internet automaticamente.
+# Se um parser for explorado, o processo só consegue escrever no próprio índice.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/dragon-scales %t
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
 [Install]
 WantedBy=default.target

@@ -40,11 +40,22 @@ _dragon_translate_line() {
     if [[ -n "$clean_cmd" ]]; then
         BUFFER="$clean_cmd"
         CURSOR=${#BUFFER}
+        _dragon_warn_if_risky "$clean_cmd"
     else
         BUFFER="$user_intent"
         zle -M "⚠️ Dragon Shell: Falha ao contatar o Ollama (${DRAGON_MODEL:-modelo do Tier})."
     fi
     zle redisplay
+}
+
+# Alerta (não bloqueia) quando o comando gerado tem cara de destrutivo ou baixa e executa código
+_dragon_warn_if_risky() {
+    local c="$1"
+    if [[ "$c" =~ '(^|[;&|[:space:]])(sudo|doas|rm[[:space:]]+-[[:alpha:]]*[rf]|dd[[:space:]]|mkfs|shred|wipefs|chmod[[:space:]]+-R|chown[[:space:]]+-R)' ]] \
+        || [[ "$c" =~ '(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh' ]] \
+        || [[ "$c" == *'> /dev/sd'* || "$c" == *'>/dev/sd'* || "$c" == *':(){'* ]]; then
+        zle -M "⚠️ Dragon Shell: comando potencialmente destrutivo. Revise com atenção antes do Enter."
+    fi
 }
 
 zle -N _dragon_translate_line
@@ -59,7 +70,9 @@ _dragon_preexec() {
     case "${1%% *}" in
         wtf|ask|gcai) return ;;
     esac
-    export _DRAGON_LAST_CMD="$1"
+    # Variável global, NÃO exportada: senão a linha anterior (que pode ter senhas, tokens)
+    # iria para o ambiente de todo processo filho
+    typeset -g _DRAGON_LAST_CMD="$1"
     _DRAGON_CAPTURE_EXIT=1
 }
 
@@ -67,7 +80,7 @@ _dragon_precmd() {
     local rc="$?"
     # Só atualiza o código de saída se um comando "de verdade" rodou
     if [[ -n "$_DRAGON_CAPTURE_EXIT" ]]; then
-        export _DRAGON_LAST_EXIT="$rc"
+        typeset -g _DRAGON_LAST_EXIT="$rc"
         unset _DRAGON_CAPTURE_EXIT
     fi
 }
@@ -89,7 +102,8 @@ wtf() {
     local answer
     answer=$("$DRAGONCTL" gen --mode wtf --max-tokens 180 -- "$query" </dev/null 2>&1) || answer="Erro ao conectar ao Ollama."
 
-    echo "\n\033[38;2;212;175;55m$answer\033[0m\n"
+    # print -r: o 'echo' do zsh converteria '\033' vindo do modelo em ESC real (injeção de terminal)
+    print -r -- $'\n\033[38;2;212;175;55m'"$answer"$'\033[0m\n'
 }
 
 # 5. Atalho rápido 'ask' para perguntas diretas no terminal com streaming
@@ -123,12 +137,18 @@ gcai() {
     fi
 }
 
-# 7. Atalhos curtos do dragonctl
+# 7. Comando sugerido pelo Dragon Breath: chega digitado, só roda se você apertar Enter
+if [[ -o interactive && -n "$DRAGON_PREFILL" ]]; then
+    print -z -- "$DRAGON_PREFILL"
+    unset DRAGON_PREFILL
+fi
+
+# 8. Atalhos curtos do dragonctl
 alias dstat='dragonctl status'
 alias devict='dragonctl evict'
 alias dsearch='dragonctl scales search'
 
-# 8. Boas-vindas com fastfetch no primeiro shell interativo (DRAGON_NO_FETCH=1 desativa)
+# 9. Boas-vindas com fastfetch no primeiro shell interativo (DRAGON_NO_FETCH=1 desativa)
 if [[ -o interactive && -z "$DRAGON_NO_FETCH" && "$SHLVL" -le 1 ]] && command -v fastfetch >/dev/null 2>&1; then
     fastfetch
 fi
